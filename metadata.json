@@ -1,0 +1,7 @@
+{
+  "name": "Sarah - Air Duct Specialist",
+  "description": "An AI-powered conversational voice agent for scheduling and pricing air duct cleaning services, featuring Gemini Live API.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
