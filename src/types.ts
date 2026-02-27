@@ -25,4 +25,5 @@ export interface CallDisposition {
   FollowUpRequired: boolean;
   CallDurationSeconds: number;
   Summary: string;
+  recordingUrl?: string;
 }

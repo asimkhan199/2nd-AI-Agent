@@ -57,11 +57,12 @@ const App: React.FC = () => {
   const [dispositions, setDispositions] = useState<CallDisposition[]>([]);
   const [isCampaignActive, setIsCampaignActive] = useState(false);
   const [listeningToId, setListeningToId] = useState<string | null>(null);
+  const [uploadedLeads, setUploadedLeads] = useState<any[]>([]);
   const spokenLinesRef = useRef<Set<string>>(new Set());
 
   // Handle simulation audio with high-quality Gemini TTS to match Test Call quality
   useEffect(() => {
-    if (!listeningToId) {
+    if (!listeningToId || !isCampaignActive) {
       window.speechSynthesis.cancel();
       return;
     }
@@ -74,13 +75,15 @@ const App: React.FC = () => {
     
     if (!spokenLinesRef.current.has(lineId)) {
       spokenLinesRef.current.add(lineId);
-      const text = lastLine.split(': ')[1];
+      const parts = lastLine.split(': ');
+      const speaker = parts[0];
+      const text = parts.slice(1).join(': ');
       if (!text) return;
 
       const playHighQualityTts = async () => {
         try {
           const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-          const isSarah = lastLine.startsWith('Sarah:');
+          const isSarah = speaker === 'Sarah';
           
           // Use the high-quality TTS model to match the "Test Call" Sarah
           const response = await ai.models.generateContent({
@@ -91,7 +94,8 @@ const App: React.FC = () => {
               speechConfig: {
                 voiceConfig: {
                   prebuiltVoiceConfig: { 
-                    voiceName: isSarah ? selectedVoice : 'Zephyr' 
+                    // Sarah always uses selectedVoice, Customer uses a fixed distinct voice
+                    voiceName: isSarah ? selectedVoice : (selectedVoice === 'Zephyr' ? 'Kore' : 'Zephyr')
                   },
                 },
               },
@@ -101,13 +105,19 @@ const App: React.FC = () => {
           if (response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data) {
             const base64Audio = response.candidates[0].content.parts[0].inlineData.data;
             const audioData = decode(base64Audio);
-            const audioBuffer = await decodeAudioData(audioData, outputAudioContextRef.current!, 24000, 1);
-            const source = outputAudioContextRef.current!.createBufferSource();
+            
+            if (!outputAudioContextRef.current || outputAudioContextRef.current.state === 'closed') {
+              outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+            }
+            const ctx = outputAudioContextRef.current;
+            
+            const audioBuffer = await decodeAudioData(audioData, ctx, 24000, 1);
+            const source = ctx.createBufferSource();
             source.buffer = audioBuffer;
-            source.connect(outputAudioContextRef.current!.destination);
+            source.connect(ctx.destination);
             source.start();
           } else {
-            throw new Error("No audio data in response");
+            throw new Error("No audio data");
           }
         } catch (error: any) {
           // Check for rate limit (429) and fallback silently to system TTS
@@ -118,15 +128,20 @@ const App: React.FC = () => {
           }
           
           const utterance = new SpeechSynthesisUtterance(text);
-          utterance.pitch = lastLine.startsWith('Sarah:') ? 1.15 : 0.9;
-          utterance.rate = lastLine.startsWith('Sarah:') ? 0.9 : 1.0;
+          // Use more natural sounding system voices if available
+          const voices = window.speechSynthesis.getVoices();
+          const preferredVoice = voices.find(v => v.name.includes('Google') || v.name.includes('Premium')) || voices[0];
+          if (preferredVoice) utterance.voice = preferredVoice;
+          
+          utterance.pitch = speaker === 'Sarah' ? 1.1 : 0.9;
+          utterance.rate = 1.0;
           window.speechSynthesis.speak(utterance);
         }
       };
 
       playHighQualityTts();
     }
-  }, [activeCalls, listeningToId, selectedVoice]);
+  }, [activeCalls, listeningToId, selectedVoice, isCampaignActive]);
 
   const sessionRef = useRef<any>(null);
   const inputAudioContextRef = useRef<AudioContext | null>(null);
@@ -135,6 +150,9 @@ const App: React.FC = () => {
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const nextStartTimeRef = useRef(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
   
   const currentInputTranscription = useRef('');
   const currentOutputTranscription = useRef('');
@@ -162,6 +180,9 @@ const App: React.FC = () => {
   }, []);
 
   const stopSession = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
     if (sessionRef.current) {
       sessionRef.current.close();
       sessionRef.current = null;
@@ -328,16 +349,29 @@ const App: React.FC = () => {
           });
 
           if (filtered.length < 5 && Math.random() > 0.5) {
-            const names = ["John Miller", "Sarah Connor", "Robert Paulson", "Ellen Ripley", "James Bond", "Bruce Wayne", "Clark Kent"];
-            const personas: any[] = ['Friendly', 'Busy', 'Rude', 'Skeptical', 'Interested'];
-            const name = names[Math.floor(Math.random() * names.length)];
-            const persona = personas[Math.floor(Math.random() * personas.length)];
+            let name, phone, address, persona;
+            
+            if (uploadedLeads.length > 0) {
+              const leadIndex = Math.floor(Math.random() * uploadedLeads.length);
+              const lead = uploadedLeads[leadIndex];
+              name = lead.Name || lead.name || "John Miller";
+              phone = lead.Phone || lead.phone || `416-555-${Math.floor(Math.random() * 9000) + 1000}`;
+              address = lead.Address || lead.address || `${Math.floor(Math.random() * 900) + 100} Oak Ave`;
+              persona = lead.Persona || lead.persona || ['Friendly', 'Busy', 'Rude', 'Skeptical', 'Interested'][Math.floor(Math.random() * 5)];
+            } else {
+              const names = ["John Miller", "Sarah Connor", "Robert Paulson", "Ellen Ripley", "James Bond", "Bruce Wayne", "Clark Kent"];
+              const personas: any[] = ['Friendly', 'Busy', 'Rude', 'Skeptical', 'Interested'];
+              name = names[Math.floor(Math.random() * names.length)];
+              persona = personas[Math.floor(Math.random() * personas.length)];
+              phone = `416-555-${Math.floor(Math.random() * 9000) + 1000}`;
+              address = `${Math.floor(Math.random() * 900) + 100} Oak Ave`;
+            }
             
             const newCall: CallSession = {
               id: Math.random().toString(36).substr(2, 9),
               leadName: name,
-              phone: `416-555-${Math.floor(Math.random() * 9000) + 1000}`,
-              address: `${Math.floor(Math.random() * 900) + 100} Oak Ave`,
+              phone: phone,
+              address: address,
               startTime: Date.now(),
               duration: 0,
               status: 'AI_SPEAKING',
@@ -380,6 +414,35 @@ const App: React.FC = () => {
       nextStartTimeRef.current = 0;
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      // Setup Recording
+      const recorderDest = outputCtx.createMediaStreamDestination();
+      const userSource = outputCtx.createMediaStreamSource(stream);
+      userSource.connect(recorderDest);
+      analyser.connect(recorderDest);
+
+      const mediaRecorder = new MediaRecorder(recorderDest.stream);
+      audioChunksRef.current = [];
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const url = URL.createObjectURL(blob);
+        setRecordingUrl(url);
+        
+        // Update the last disposition if it was waiting for a recording
+        setDispositions(prev => {
+          if (prev.length === 0) return prev;
+          const updated = [...prev];
+          if (updated[0].recordingUrl === 'generating...') {
+            updated[0] = { ...updated[0], recordingUrl: url };
+          }
+          return updated;
+        });
+      };
+      mediaRecorder.start();
+      mediaRecorderRef.current = mediaRecorder;
 
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
@@ -497,6 +560,8 @@ const App: React.FC = () => {
                   }, ...prev]);
                   
                   // Generate disposition
+                  const finalRecordingUrl = recordingUrl || (mediaRecorderRef.current?.state === 'inactive' ? undefined : 'generating...');
+                  
                   setDispositions(d => [{
                     LeadName: leadInfo?.name || "Prospective Homeowner",
                     Phone: leadInfo?.phone || "416-555-0199",
@@ -509,7 +574,8 @@ const App: React.FC = () => {
                     AppointmentDate: reason === 'completed' ? "2024-03-25" : "",
                     FollowUpRequired: reason !== 'completed',
                     CallDurationSeconds: Math.floor(silenceDuration),
-                    Summary: `Call ended with status: ${reason}.`
+                    Summary: `Call ended with status: ${reason}.`,
+                    recordingUrl: finalRecordingUrl || undefined
                   }, ...d]);
 
                   setActiveCalls(prev => prev.filter(c => c.id !== 'live-session'));
@@ -613,6 +679,11 @@ const App: React.FC = () => {
           onStop={handleStopCall}
           onStartLive={startSession}
           onStopLive={stopSession}
+          onUploadLeads={(leads) => {
+            setUploadedLeads(leads);
+            setLastAction(`Database Updated: ${leads.length} Leads Ready for Sarah.`);
+            setTimeout(() => setLastAction(null), 3000);
+          }}
           isLiveActive={isActive}
           listeningToId={listeningToId}
         />
