@@ -58,6 +58,8 @@ const App: React.FC = () => {
   const [isCampaignActive, setIsCampaignActive] = useState(false);
   const [listeningToId, setListeningToId] = useState<string | null>(null);
   const [uploadedLeads, setUploadedLeads] = useState<any[]>([]);
+  const [cacheStats, setCacheStats] = useState({ hits: 0, misses: 0 });
+  const voiceCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
   const spokenLinesRef = useRef<Set<string>>(new Set());
 
   // Handle simulation audio with high-quality Gemini TTS to match Test Call quality
@@ -81,9 +83,25 @@ const App: React.FC = () => {
       if (!text) return;
 
       const playHighQualityTts = async () => {
+        const isSarah = speaker === 'Sarah';
+        const voiceName = isSarah ? selectedVoice : (selectedVoice === 'Zephyr' ? 'Kore' : 'Zephyr');
+        const cacheKey = `${voiceName}-${text.toLowerCase().trim()}`;
+
+        // 1. Check Intelligent Cache first to save API costs
+        if (voiceCacheRef.current.has(cacheKey)) {
+          const cachedBuffer = voiceCacheRef.current.get(cacheKey)!;
+          const ctx = outputAudioContextRef.current!;
+          const source = ctx.createBufferSource();
+          source.buffer = cachedBuffer;
+          source.connect(ctx.destination);
+          source.start();
+          setCacheStats(prev => ({ ...prev, hits: prev.hits + 1 }));
+          return;
+        }
+
         try {
+          setCacheStats(prev => ({ ...prev, misses: prev.misses + 1 }));
           const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-          const isSarah = speaker === 'Sarah';
           
           // Use the high-quality TTS model to match the "Test Call" Sarah
           const response = await ai.models.generateContent({
@@ -93,10 +111,7 @@ const App: React.FC = () => {
               responseModalities: [Modality.AUDIO],
               speechConfig: {
                 voiceConfig: {
-                  prebuiltVoiceConfig: { 
-                    // Sarah always uses selectedVoice, Customer uses a fixed distinct voice
-                    voiceName: isSarah ? selectedVoice : (selectedVoice === 'Zephyr' ? 'Kore' : 'Zephyr')
-                  },
+                  prebuiltVoiceConfig: { voiceName },
                 },
               },
             },
@@ -112,6 +127,10 @@ const App: React.FC = () => {
             const ctx = outputAudioContextRef.current;
             
             const audioBuffer = await decodeAudioData(audioData, ctx, 24000, 1);
+            
+            // 2. Train the system: Store in cache for future reuse
+            voiceCacheRef.current.set(cacheKey, audioBuffer);
+            
             const source = ctx.createBufferSource();
             source.buffer = audioBuffer;
             source.connect(ctx.destination);
@@ -180,28 +199,31 @@ const App: React.FC = () => {
   }, []);
 
   const stopSession = useCallback(() => {
+    setIsActive(false);
+    setIsModelSpeaking(false);
+    setIsUserSpeaking(false);
+    setListeningToId(null);
+
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
+      try { mediaRecorderRef.current.stop(); } catch (e) {}
     }
     if (sessionRef.current) {
-      sessionRef.current.close();
+      try { sessionRef.current.close(); } catch (e) {}
       sessionRef.current = null;
     }
     if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
-      inputAudioContextRef.current.close();
+      try { inputAudioContextRef.current.close(); } catch (e) {}
       inputAudioContextRef.current = null;
     }
     if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
-      outputAudioContextRef.current.close();
+      try { outputAudioContextRef.current.close(); } catch (e) {}
       outputAudioContextRef.current = null;
     }
     sourcesRef.current.forEach(s => {
       try { s.stop(); } catch (e) {}
     });
     sourcesRef.current.clear();
-    setIsActive(false);
-    setIsModelSpeaking(false);
-    setIsUserSpeaking(false);
+    window.speechSynthesis.cancel();
   }, []);
 
   useEffect(() => {
@@ -656,6 +678,11 @@ const App: React.FC = () => {
   };
 
   const handleStopCall = (id: string) => {
+    if (id === listeningToId) {
+      setListeningToId(null);
+      window.speechSynthesis.cancel();
+    }
+    
     if (id === 'live-session') {
       stopSession();
     } else {
@@ -679,6 +706,7 @@ const App: React.FC = () => {
           onStop={handleStopCall}
           onStartLive={startSession}
           onStopLive={stopSession}
+          cacheStats={cacheStats}
           onUploadLeads={(leads) => {
             setUploadedLeads(leads);
             setLastAction(`Database Updated: ${leads.length} Leads Ready for Sarah.`);

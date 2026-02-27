@@ -12,6 +12,7 @@ interface DashboardProps {
   onStartLive: () => void;
   onStopLive: () => void;
   onUploadLeads: (leads: any[]) => void;
+  cacheStats?: { hits: number, misses: number };
   isLiveActive: boolean;
   dispositions: CallDisposition[];
   listeningToId: string | null;
@@ -26,6 +27,7 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
   onStartLive,
   onStopLive,
   onUploadLeads,
+  cacheStats = { hits: 0, misses: 0 },
   isLiveActive,
   dispositions,
   listeningToId
@@ -33,6 +35,10 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
   const [view, setView] = useState<'live' | 'reports'>('live');
   const [playingRecording, setPlayingRecording] = useState<CallDisposition | null>(null);
   const [showVoipSettings, setShowVoipSettings] = useState(false);
+
+  const totalRequests = cacheStats.hits + cacheStats.misses;
+  const savingsRate = totalRequests > 0 ? Math.round((cacheStats.hits / totalRequests) * 100) : 0;
+  const estimatedSavings = (cacheStats.hits * 0.005).toFixed(2); // Estimating $0.005 per TTS call
 
   const handleCsvUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -118,6 +124,19 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
             >
               Reports
             </button>
+          </div>
+
+          {/* Cost Savings Indicator */}
+          <div className="flex items-center gap-3 px-4 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl">
+            <div className="flex flex-col">
+              <span className="text-[8px] font-black text-emerald-400 uppercase tracking-widest">Cost Savings</span>
+              <span className="text-[10px] font-bold text-white">{savingsRate}% Efficiency</span>
+            </div>
+            <div className="h-6 w-[1px] bg-emerald-500/20"></div>
+            <div className="flex flex-col">
+              <span className="text-[8px] font-black text-emerald-400 uppercase tracking-widest">Saved</span>
+              <span className="text-[10px] font-bold text-white">${estimatedSavings}</span>
+            </div>
           </div>
 
           <div className="flex items-center gap-4 border-l border-white/10 pl-6">
