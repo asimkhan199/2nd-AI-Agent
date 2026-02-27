@@ -12,6 +12,7 @@ export interface CallSession {
   isLive: boolean;
   persona?: 'Friendly' | 'Busy' | 'Rude' | 'Skeptical' | 'Interested';
   recordingUrl?: string;
+  cost?: number;
 }
 
 export interface CallDisposition {
@@ -28,6 +29,7 @@ export interface CallDisposition {
   CallDurationSeconds: number;
   Summary: string;
   recordingUrl?: string;
+  cost?: number;
 }
 
 export interface Message {
@@ -42,4 +44,16 @@ export interface ToolCallLog {
   args: any;
   status: 'pending' | 'success' | 'error';
   timestamp: Date;
+}
+
+export interface Appointment {
+  id: string;
+  firstName: string;
+  lastName: string;
+  address: string;
+  phone: string;
+  time: string;
+  price: string;
+  recordingUrl?: string;
+  description: string;
 }

@@ -1,6 +1,6 @@
 {
-  "name": "Sarah - Air Duct Specialist",
-  "description": "An AI-powered conversational voice agent for scheduling and pricing air duct cleaning services, featuring Gemini Live API.",
+  "name": "ENVISION SERVICES",
+  "description": "An AI-powered conversational voice agent for Envision Services, featuring Gemini Live API and intelligent cost optimization.",
   "requestFramePermissions": [
     "microphone"
   ]

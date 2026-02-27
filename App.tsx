@@ -1,7 +1,7 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
-import { SYSTEM_INSTRUCTIONS, CHECK_CALENDAR_TOOL, BOOK_APPOINTMENT_TOOL, END_CALL_TOOL } from './constants';
+import { getSystemInstructions, CHECK_CALENDAR_TOOL, BOOK_APPOINTMENT_TOOL, END_CALL_TOOL } from './constants';
 import { CallSession, CallDisposition } from './types';
 import { OrchestrationDashboard } from './src/components/Dashboard';
 import { Play, PhoneOff, Users, X, Settings } from 'lucide-react';
@@ -58,7 +58,10 @@ const App: React.FC = () => {
   const [isCampaignActive, setIsCampaignActive] = useState(false);
   const [listeningToId, setListeningToId] = useState<string | null>(null);
   const [uploadedLeads, setUploadedLeads] = useState<any[]>([]);
+  const [customRebuttals, setCustomRebuttals] = useState<string>("");
+  const [appointments, setAppointments] = useState<any[]>([]);
   const [cacheStats, setCacheStats] = useState({ hits: 0, misses: 0 });
+  const [dailyCost, setDailyCost] = useState(0);
   const voiceCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
   const spokenLinesRef = useRef<Set<string>>(new Set());
 
@@ -101,6 +104,9 @@ const App: React.FC = () => {
 
         try {
           setCacheStats(prev => ({ ...prev, misses: prev.misses + 1 }));
+          const ttsCost = 0.005; // $0.005 per TTS generation
+          setDailyCost(prev => prev + ttsCost);
+          
           const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
           
           // Use the high-quality TTS model to match the "Test Call" Sarah
@@ -253,20 +259,31 @@ const App: React.FC = () => {
         setActiveCalls(prev => {
           // Update durations and simulate conversation flow
           const updated = prev.map(call => {
-            if (call.isLive) return { ...call, duration: call.duration + 1 };
+            const minuteCost = (1/60) * 0.01; // $0.01 per minute for Live API
+            setDailyCost(d => d + minuteCost);
+            const currentCost = (call.cost || 0) + minuteCost;
+
+            if (call.isLive) return { ...call, duration: call.duration + 1, cost: currentCost };
             
             const newDuration = call.duration + 1;
             let newTranscript = [...call.transcript];
             let newStatus = call.status;
             let newSentiment = call.sentiment;
 
+            const names = ['Sarah', 'Emily', 'Jessica'];
+            const agentName = names[Math.floor(Math.random() * names.length)];
+            
             // Simulate conversation steps every 8 seconds for more realism
             if (newDuration % 8 === 0) {
               const step = Math.floor(newDuration / 8);
               let newLine = "";
               
               if (step === 1) {
-                newLine = `Sarah: Hi there! I'm calling because we're doing a special promotion for air duct cleaning in your area today. Is this the homeowner I'm speaking with?`;
+                // Try to find a custom opening
+                const customOpening = customRebuttals.match(/opening:?\s*(.*)/i)?.[1] || 
+                                     (customRebuttals.toLowerCase().includes('hi') ? customRebuttals.split('\n')[0] : null);
+                  
+                newLine = `${agentName}: ${customOpening || `Hi there! I'm calling from Envision Services because we're doing a special promotion for air duct cleaning in your area today. Is this the homeowner?`}`;
                 newStatus = 'AI_SPEAKING';
               } else if (step === 2) {
                 if (call.persona === 'Friendly') {
@@ -288,11 +305,17 @@ const App: React.FC = () => {
                 newStatus = 'CUSTOMER_SPEAKING';
               } else if (step === 3) {
                 if (newSentiment === 'Frustrated') {
-                  newLine = `Sarah: I completely understand, and I certainly don't want to take up any more of your time. I'll make sure you're removed from our list. Have a lovely day!`;
+                  newLine = `${agentName}: I completely understand, and I certainly don't want to take up any more of your time. I'll make sure you're removed from our list. Have a lovely day!`;
                 } else if (newSentiment === 'Negative') {
-                  newLine = `Sarah: I totally get that skepticism! We're actually a local, family-owned business with over 500 five-star reviews. We're doing a full-house deep clean for just $129 today—it's our best rate of the season.`;
+                  // Check for custom rebuttal for "skepticism"
+                  const customSkeptic = customRebuttals.match(/skeptic:?\s*(.*)/i)?.[1] || null;
+                  newLine = `${agentName}: ${customSkeptic || `I totally get that skepticism! We're actually a local, family-owned business with over 500 five-star reviews. We're doing a full-house deep clean for just $129 today—it's our best rate of the season.`}`;
                 } else {
-                  newLine = `Sarah: It's a wonderful deal! We're offering a complete, deep-clean of all your ducts for just $129. We actually have a crew finishing up a job on your street right now and could fit you in this afternoon.`;
+                  // Check for custom offer
+                  const customOffer = customRebuttals.match(/offer:?\s*(.*)/i)?.[1] || 
+                                     customRebuttals.match(/\$(\d+)/)?.[0] || 
+                                     null;
+                  newLine = `${agentName}: ${customOffer ? `It's a wonderful deal! We're offering a complete, deep-clean of all your ducts for just ${customOffer}. We actually have a crew finishing up a job on your street right now and could fit you in this afternoon.` : `It's a wonderful deal! We're offering a complete, deep-clean of all your ducts for just $129. We actually have a crew finishing up a job on your street right now and could fit you in this afternoon.`}`;
                 }
                 newStatus = 'AI_SPEAKING';
               } else if (step === 4 && newSentiment !== 'Frustrated') {
@@ -311,18 +334,18 @@ const App: React.FC = () => {
                 newStatus = 'CUSTOMER_SPEAKING';
               } else if (step === 5 && newSentiment === 'Positive') {
                 const confirmedTime = newTranscript.find(l => l.includes('available'))?.split('available ')[1]?.replace('?', '') || "4:30 PM";
-                newLine = `Sarah: We can absolutely make ${confirmedTime} work for you! I'll get that all locked in. I just want to double-check, your address is ${call.address}, correct?`;
+                newLine = `${agentName}: We can absolutely make ${confirmedTime} work for you! I'll get that all locked in. I just want to double-check, your address is ${call.address}, correct?`;
                 newStatus = 'AI_SPEAKING';
               } else if (step === 6 && newSentiment === 'Positive') {
                 newLine = `Customer: Yes, that's correct. See you then!`;
                 newStatus = 'CUSTOMER_SPEAKING';
               } else if (step === 7 && newSentiment === 'Positive') {
                 const confirmedTime = newTranscript.find(l => l.includes('make'))?.split('make ')[1]?.split(' work')[0] || "4:30 PM";
-                newLine = `Sarah: Perfect! You're all set for ${confirmedTime}. Our technician will give you a quick call when they're 15 minutes away. Have a wonderful rest of your day!`;
+                newLine = `${agentName}: Perfect! You're all set for ${confirmedTime}. Our technician will give you a quick call when they're 15 minutes away. Have a wonderful rest of your day!`;
                 newStatus = 'AI_SPEAKING';
               }
- else if (step === 5 && newSentiment === 'Negative') {
-                newLine = `Sarah: That's a great question! No, that $129 is all-inclusive for up to 15 vents. No hidden fees, no surprises. I'd love to show you why our customers love us. Shall we try a slot this afternoon?`;
+              else if (step === 5 && newSentiment === 'Negative') {
+                newLine = `${agentName}: That's a great question! No, that $129 is all-inclusive for up to 15 vents. No hidden fees, no surprises. I'd love to show you why our customers love us. Shall we try a slot this afternoon?`;
                 newStatus = 'AI_SPEAKING';
               }
 
@@ -336,7 +359,8 @@ const App: React.FC = () => {
               duration: newDuration,
               transcript: newTranscript.slice(-10),
               status: newStatus,
-              sentiment: newSentiment
+              sentiment: newSentiment,
+              cost: currentCost
             };
           });
 
@@ -347,6 +371,23 @@ const App: React.FC = () => {
             const shouldFinish = (call.duration > 80) || (call.sentiment === 'Frustrated' && call.duration > 30);
             if (shouldFinish) {
               const isBooked = call.sentiment === 'Positive' && call.duration > 40;
+              const recUrl = isBooked ? `https://storage.googleapis.com/sarah-recordings/${call.id}.mp3` : undefined;
+              
+              if (isBooked) {
+                const newAppt = {
+                  id: call.id,
+                  firstName: call.leadName.split(' ')[0],
+                  lastName: call.leadName.split(' ')[1] || '',
+                  address: call.address,
+                  phone: call.phone,
+                  time: "2024-03-25 10:00 AM",
+                  price: "$129",
+                  recordingUrl: recUrl,
+                  description: `Air Duct Cleaning for ${call.leadName}. Price: $129. Confirmed via automated campaign.`
+                };
+                setAppointments(prev => [newAppt, ...prev]);
+              }
+
               setDispositions(d => [{
                 LeadName: call.leadName,
                 Phone: call.phone,
@@ -360,7 +401,8 @@ const App: React.FC = () => {
                 FollowUpRequired: !isBooked && call.persona !== 'Rude',
                 CallDurationSeconds: Math.floor(call.duration),
                 Summary: isBooked ? "Confirmed booking for $129 deep clean." : "Call ended without booking.",
-                recordingUrl: isBooked ? `https://storage.googleapis.com/sarah-recordings/${call.id}.mp3` : undefined
+                recordingUrl: recUrl,
+                cost: call.cost
               }, ...d]);
               if (listeningToId === call.id) {
                 setListeningToId(null);
@@ -418,7 +460,7 @@ const App: React.FC = () => {
       clearInterval(interval);
       window.speechSynthesis.cancel();
     };
-  }, [isCampaignActive, listeningToId]);
+  }, [isCampaignActive, listeningToId, customRebuttals]);
 
   const startSession = async () => {
     try {
@@ -462,6 +504,16 @@ const App: React.FC = () => {
           }
           return updated;
         });
+
+        // Update the last appointment if it was waiting for a recording
+        setAppointments(prev => {
+          if (prev.length === 0) return prev;
+          const updated = [...prev];
+          if (updated[0].recordingUrl === 'generating...') {
+            updated[0] = { ...updated[0], recordingUrl: url };
+          }
+          return updated;
+        });
       };
       mediaRecorder.start();
       mediaRecorderRef.current = mediaRecorder;
@@ -470,7 +522,7 @@ const App: React.FC = () => {
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: SYSTEM_INSTRUCTIONS,
+          systemInstruction: getSystemInstructions(customRebuttals),
           tools: [{ functionDeclarations: [CHECK_CALENDAR_TOOL, BOOK_APPOINTMENT_TOOL, END_CALL_TOOL] }],
           outputAudioTranscription: {},
           inputAudioTranscription: {},
@@ -582,19 +634,20 @@ const App: React.FC = () => {
                   }, ...prev]);
                   
                   // Generate disposition
-                  const finalRecordingUrl = recordingUrl || (mediaRecorderRef.current?.state === 'inactive' ? undefined : 'generating...');
+                  const isBooked = reason === 'completed';
+                  const finalRecordingUrl = isBooked ? (recordingUrl || (mediaRecorderRef.current?.state === 'inactive' ? undefined : 'generating...')) : undefined;
                   
                   setDispositions(d => [{
                     LeadName: leadInfo?.name || "Prospective Homeowner",
                     Phone: leadInfo?.phone || "416-555-0199",
-                    Disposition: reason === 'completed' ? 'Hot' : 'Not Interested',
-                    ConvertibleScore: reason === 'completed' ? 95 : 20,
-                    BookingProbability: reason === 'completed' ? "High" : "Low",
+                    Disposition: isBooked ? 'Hot' : 'Not Interested',
+                    ConvertibleScore: isBooked ? 95 : 20,
+                    BookingProbability: isBooked ? "High" : "Low",
                     ObjectionType: reason === 'hung_up' ? "Disconnected" : "None",
                     Sentiment: 'Neutral',
-                    AppointmentBooked: reason === 'completed',
-                    AppointmentDate: reason === 'completed' ? "2024-03-25" : "",
-                    FollowUpRequired: reason !== 'completed',
+                    AppointmentBooked: isBooked,
+                    AppointmentDate: isBooked ? "2024-03-25" : "",
+                    FollowUpRequired: !isBooked,
                     CallDurationSeconds: Math.floor(silenceDuration),
                     Summary: `Call ended with status: ${reason}.`,
                     recordingUrl: finalRecordingUrl || undefined
@@ -608,6 +661,24 @@ const App: React.FC = () => {
                   }, 3000);
                   continue;
                 }
+
+                if (fc.name === 'book_appointment') {
+                  const args = fc.args as any;
+                  const newAppt = {
+                    id: Math.random().toString(36).substr(2, 9),
+                    firstName: args.first_name,
+                    lastName: args.last_name,
+                    address: args.full_address,
+                    phone: args.home_phone,
+                    time: args.appointment_time,
+                    price: args.price,
+                    recordingUrl: recordingUrl || 'generating...',
+                    description: `Air Duct Cleaning for ${args.first_name} ${args.last_name}. Price: ${args.price}. Driveway: ${args.has_driveway ? 'Yes' : 'No'}. DNC Permission: ${args.dnc_permission_granted ? 'Yes' : 'No'}.`
+                  };
+                  setAppointments(prev => [newAppt, ...prev]);
+                  setLastAction(`Booking Confirmed for ${args.first_name}!`);
+                }
+
                 setTimeout(() => {
                   let result = { status: "success", message: "Action completed." };
                   sessionPromise.then(session => {
@@ -644,7 +715,8 @@ const App: React.FC = () => {
               transcript: [],
               sentiment: 'Neutral',
               convertibleScore: 50,
-              isLive: true
+              isLive: true,
+              cost: 0
             };
             setActiveCalls(prev => {
               const exists = prev.some(c => c.id === 'live-session');
@@ -712,8 +784,17 @@ const App: React.FC = () => {
             setLastAction(`Database Updated: ${leads.length} Leads Ready for Sarah.`);
             setTimeout(() => setLastAction(null), 3000);
           }}
+          customRebuttals={customRebuttals}
+          onUpdateRebuttals={(text) => {
+            setCustomRebuttals(text);
+            setLastAction("Sarah's Brain Updated with New Rebuttals.");
+            setTimeout(() => setLastAction(null), 3000);
+          }}
+          dailyCost={dailyCost}
           isLiveActive={isActive}
           listeningToId={listeningToId}
+          appointments={appointments}
+          onUpdateAppointments={setAppointments}
         />
       </div>
 

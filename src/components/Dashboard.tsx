@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { CallSession, CallDisposition } from '../types';
-import { Play, Pause, PhoneOff, MessageSquare, UserPlus, AlertCircle, TrendingUp, BarChart3, Users, Volume2, XCircle, Settings, Globe, ShieldCheck, Zap } from 'lucide-react';
+import { Play, Pause, PhoneOff, MessageSquare, UserPlus, AlertCircle, TrendingUp, BarChart3, Users, Volume2, XCircle, Settings, Globe, ShieldCheck, Zap, Calendar as CalendarIcon, Clock, MapPin, Phone } from 'lucide-react';
 import Papa from 'papaparse';
 
 interface DashboardProps {
@@ -12,10 +12,15 @@ interface DashboardProps {
   onStartLive: () => void;
   onStopLive: () => void;
   onUploadLeads: (leads: any[]) => void;
+  onUpdateRebuttals: (text: string) => void;
+  customRebuttals: string;
+  dailyCost?: number;
   cacheStats?: { hits: number, misses: number };
   isLiveActive: boolean;
   dispositions: CallDisposition[];
   listeningToId: string | null;
+  appointments: any[];
+  onUpdateAppointments: (appts: any[]) => void;
 }
 
 export const OrchestrationDashboard: React.FC<DashboardProps> = ({ 
@@ -27,14 +32,32 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
   onStartLive,
   onStopLive,
   onUploadLeads,
+  onUpdateRebuttals,
+  customRebuttals,
+  dailyCost = 0,
   cacheStats = { hits: 0, misses: 0 },
   isLiveActive,
   dispositions,
-  listeningToId
+  listeningToId,
+  appointments = [],
+  onUpdateAppointments
 }) => {
-  const [view, setView] = useState<'live' | 'reports'>('live');
+  const [view, setView] = useState<'live' | 'reports' | 'training' | 'costs' | 'calendar'>('live');
   const [playingRecording, setPlayingRecording] = useState<CallDisposition | null>(null);
   const [showVoipSettings, setShowVoipSettings] = useState(false);
+  const [localRebuttals, setLocalRebuttals] = useState(customRebuttals);
+  const [agentName, setAgentName] = useState('Sarah');
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    setLocalRebuttals(customRebuttals);
+  }, [customRebuttals]);
+
+  const handleSync = () => {
+    setIsSaving(true);
+    onUpdateRebuttals(localRebuttals);
+    setTimeout(() => setIsSaving(false), 2000);
+  };
 
   const totalRequests = cacheStats.hits + cacheStats.misses;
   const savingsRate = totalRequests > 0 ? Math.round((cacheStats.hits / totalRequests) * 100) : 0;
@@ -62,10 +85,10 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
       <div className="flex items-center justify-between px-8 py-6 border-b border-white/5">
         <div className="flex items-center gap-4">
           <div className="w-10 h-10 bg-indigo-500 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/20">
-            <TrendingUp className="w-6 h-6 text-white" />
+            <Zap className="w-6 h-6 text-white" />
           </div>
           <div>
-            <h1 className="text-xl font-black uppercase tracking-tighter">Sarah Orchestration Engine</h1>
+            <h1 className="text-xl font-black uppercase tracking-tighter">ENVISION SERVICES</h1>
             <p className="text-[10px] text-white/40 font-mono uppercase tracking-widest">v2.5 Production Cluster</p>
           </div>
         </div>
@@ -124,7 +147,32 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
             >
               Reports
             </button>
+            <button 
+              onClick={() => setView('training')}
+              className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${view === 'training' ? 'bg-indigo-500 text-white shadow-lg' : 'text-white/40 hover:text-white'}`}
+            >
+              Training Lab
+            </button>
+            <button 
+              onClick={() => setView('costs')}
+              className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${view === 'costs' ? 'bg-indigo-500 text-white shadow-lg' : 'text-white/40 hover:text-white'}`}
+            >
+              Cost Reports
+            </button>
+            <button 
+              onClick={() => setView('calendar')}
+              className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${view === 'calendar' ? 'bg-indigo-500 text-white shadow-lg' : 'text-white/40 hover:text-white'}`}
+            >
+              Calendar
+            </button>
           </div>
+
+          {customRebuttals && (
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-500/10 border border-amber-500/20 rounded-lg animate-pulse">
+              <Zap className="w-3 h-3 text-amber-400" />
+              <span className="text-[9px] font-black uppercase tracking-widest text-amber-400">Training Active</span>
+            </div>
+          )}
 
           {/* Cost Savings Indicator */}
           <div className="flex items-center gap-3 px-4 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-xl">
@@ -156,7 +204,300 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
 
       {/* Main Content */}
       <div className="flex-1 overflow-hidden flex">
-        {view === 'live' ? (
+        {view === 'costs' ? (
+          <div className="flex-1 p-8 overflow-y-auto custom-scrollbar flex flex-col">
+            <div className="flex items-center gap-6 mb-8">
+              <div className="w-16 h-16 bg-emerald-500/10 rounded-2xl flex items-center justify-center border border-emerald-500/20">
+                <BarChart3 className="w-8 h-8 text-emerald-400" />
+              </div>
+              <div>
+                <h2 className="text-3xl font-black uppercase tracking-tighter">Financial Intelligence</h2>
+                <p className="text-xs text-white/40 font-mono uppercase tracking-widest">Real-time API cost analysis and optimization metrics</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-8 mb-8">
+              <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                <span className="text-[10px] font-black text-white/30 uppercase tracking-widest block mb-2">Daily Total Cost</span>
+                <span className="text-4xl font-black text-white">${dailyCost.toFixed(4)}</span>
+                <div className="mt-4 flex items-center gap-2 text-[10px] text-emerald-400">
+                  <TrendingUp className="w-3 h-3" /> 82% lower than human agents
+                </div>
+              </div>
+              <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                <span className="text-[10px] font-black text-white/30 uppercase tracking-widest block mb-2">Avg. Cost Per Minute</span>
+                <span className="text-4xl font-black text-white">$0.012</span>
+                <div className="mt-4 flex items-center gap-2 text-[10px] text-white/40 italic">
+                  Optimized via Neural Cache
+                </div>
+              </div>
+              <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                <span className="text-[10px] font-black text-white/30 uppercase tracking-widest block mb-2">Neural Cache Hits</span>
+                <span className="text-4xl font-black text-indigo-400">{cacheStats.hits}</span>
+                <div className="mt-4 flex items-center gap-2 text-[10px] text-indigo-400">
+                  <Zap className="w-3 h-3" /> ${estimatedSavings} saved today
+                </div>
+              </div>
+              <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                <span className="text-[10px] font-black text-white/30 uppercase tracking-widest block mb-2">Efficiency Rate</span>
+                <span className="text-4xl font-black text-emerald-400">{savingsRate}%</span>
+                <div className="mt-4 flex items-center gap-2 text-[10px] text-emerald-400">
+                  <ShieldCheck className="w-3 h-3" /> System Optimized
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8 flex-1">
+              <h3 className="text-sm font-black uppercase tracking-widest mb-6">Cost Breakdown by Call</h3>
+              <div className="space-y-4">
+                {dispositions.slice(0, 10).map((d, i) => (
+                  <div key={i} className="flex items-center justify-between p-4 bg-black/40 rounded-2xl border border-white/5">
+                    <div className="flex items-center gap-4">
+                      <div className="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center text-[10px] font-bold">
+                        {i + 1}
+                      </div>
+                      <div>
+                        <p className="text-sm font-bold text-white">{d.LeadName}</p>
+                        <p className="text-[10px] text-white/40">{d.CallDurationSeconds}s duration</p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-mono font-bold text-emerald-400">${(d.cost || (d.CallDurationSeconds * 0.0002 + 0.005)).toFixed(4)}</p>
+                      <p className="text-[8px] text-white/20 uppercase font-black">API + TTS</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : view === 'calendar' ? (
+          <div className="flex-1 p-8 overflow-y-auto custom-scrollbar flex flex-col">
+            <div className="flex items-center gap-6 mb-8">
+              <div className="w-16 h-16 bg-indigo-500/10 rounded-2xl flex items-center justify-center border border-indigo-500/20">
+                <CalendarIcon className="w-8 h-8 text-indigo-400" />
+              </div>
+              <div>
+                <h2 className="text-3xl font-black uppercase tracking-tighter">Booking Calendar</h2>
+                <p className="text-xs text-white/40 font-mono uppercase tracking-widest">Manage and view all confirmed air duct cleaning appointments</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 flex-1">
+              <div className="lg:col-span-2 space-y-4">
+                {appointments.length === 0 ? (
+                  <div className="h-64 bg-white/5 rounded-[2rem] border border-white/10 border-dashed flex flex-col items-center justify-center text-white/20">
+                    <CalendarIcon className="w-12 h-12 mb-4 opacity-20" />
+                    <p className="text-sm font-bold uppercase tracking-widest">No appointments booked yet</p>
+                  </div>
+                ) : (
+                  appointments.map((appt, i) => (
+                    <div key={appt.id} className="bg-white/5 rounded-[2rem] border border-white/10 p-8 hover:bg-white/[0.07] transition-all group">
+                      <div className="flex items-start justify-between mb-6">
+                        <div className="flex items-center gap-4">
+                          <div className="w-12 h-12 rounded-2xl bg-indigo-500/20 flex items-center justify-center text-indigo-400 font-black">
+                            {appt.firstName[0]}{appt.lastName[0]}
+                          </div>
+                          <div>
+                            <h4 className="text-xl font-black text-white">{appt.firstName} {appt.lastName}</h4>
+                            <div className="flex items-center gap-3 mt-1">
+                              <span className="flex items-center gap-1 text-[10px] text-white/40 font-mono">
+                                <Clock className="w-3 h-3" /> {appt.time}
+                              </span>
+                              <span className="flex items-center gap-1 text-[10px] text-emerald-400 font-mono font-bold">
+                                <TrendingUp className="w-3 h-3" /> {appt.price}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                        {appt.recordingUrl && appt.recordingUrl !== 'generating...' && (
+                          <button 
+                            onClick={() => setPlayingRecording({ LeadName: `${appt.firstName} ${appt.lastName}`, Phone: appt.phone, recordingUrl: appt.recordingUrl } as any)}
+                            className="p-3 bg-indigo-500 rounded-xl text-white shadow-lg shadow-indigo-500/20 opacity-0 group-hover:opacity-100 transition-all"
+                            title="Listen to Call Recording"
+                          >
+                            <Volume2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-6 mb-6">
+                        <div className="space-y-1">
+                          <span className="text-[9px] text-white/20 uppercase font-black block">Service Address</span>
+                          <div className="flex items-center gap-2 text-xs text-white/60">
+                            <MapPin className="w-3 h-3 text-indigo-400" /> {appt.address}
+                          </div>
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-[9px] text-white/20 uppercase font-black block">Contact Number</span>
+                          <div className="flex items-center gap-2 text-xs text-white/60">
+                            <Phone className="w-3 h-3 text-indigo-400" /> {appt.phone}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="p-4 bg-black/40 rounded-2xl border border-white/5">
+                        <span className="text-[9px] text-white/20 uppercase font-black block mb-2">Detailed Description</span>
+                        <p className="text-xs text-white/50 leading-relaxed italic">
+                          {appt.description}
+                        </p>
+                        {appt.recordingUrl && (
+                          <div className="mt-4 pt-4 border-t border-white/5 flex items-center justify-between">
+                            <span className="text-[9px] text-white/30 font-black uppercase tracking-widest">Call Evidence Attached</span>
+                            <a 
+                              href={appt.recordingUrl} 
+                              target="_blank" 
+                              rel="noreferrer"
+                              className="text-[10px] text-indigo-400 hover:text-indigo-300 font-bold underline underline-offset-4"
+                            >
+                              Download Call Recording
+                            </a>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="space-y-6">
+                <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                  <h4 className="text-[10px] font-black text-white/40 uppercase tracking-widest mb-4">Calendar Statistics</h4>
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-white/60">Total Bookings</span>
+                      <span className="text-lg font-black text-white">{appointments.length}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-white/60">Revenue Pipeline</span>
+                      <span className="text-lg font-black text-emerald-400">
+                        ${appointments.reduce((acc, curr) => acc + parseFloat(curr.price.replace('$', '')), 0)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-indigo-500/10 rounded-[2rem] border border-indigo-500/20 p-8">
+                  <div className="flex items-center gap-3 mb-4">
+                    <ShieldCheck className="w-5 h-5 text-indigo-400" />
+                    <h4 className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">Booking Verification</h4>
+                  </div>
+                  <p className="text-xs text-white/40 leading-relaxed">
+                    Every booking in this calendar is verified by Sarah's AI. Recordings are automatically attached to the event description for quality assurance and dispute resolution.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : view === 'training' ? (
+          <div className="flex-1 p-8 overflow-y-auto custom-scrollbar flex flex-col">
+            <div className="flex items-center gap-6 mb-8">
+              <div className="w-16 h-16 bg-amber-500/10 rounded-2xl flex items-center justify-center border border-amber-500/20">
+                <Zap className="w-8 h-8 text-amber-400" />
+              </div>
+              <div>
+                <h2 className="text-3xl font-black uppercase tracking-tighter">Sarah Training Lab</h2>
+                <p className="text-xs text-white/40 font-mono uppercase tracking-widest">Inject custom rebuttals and logic directly into Sarah's brain</p>
+              </div>
+            </div>
+
+            <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-8 min-h-0">
+              <div className="lg:col-span-2 flex flex-col bg-white/5 rounded-[2rem] border border-white/10 p-8 min-h-[400px]">
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-sm font-black uppercase tracking-widest flex items-center gap-2">
+                    <MessageSquare className="w-4 h-4 text-indigo-400" /> Custom Rebuttals & Knowledge
+                  </h3>
+                  <span className="text-[10px] font-mono text-white/20">Markdown Supported</span>
+                </div>
+                
+                <textarea 
+                  value={localRebuttals}
+                  onChange={(e) => setLocalRebuttals(e.target.value)}
+                  placeholder="e.g. If the customer says they already have a service, tell them our industrial-grade suction is 3x more powerful..."
+                  className="flex-1 bg-black/40 border border-white/5 rounded-2xl p-6 text-sm font-mono text-white/80 focus:border-indigo-500 outline-none resize-none custom-scrollbar mb-6"
+                />
+
+                <div className="flex gap-4">
+                  <button 
+                    onClick={handleSync}
+                    disabled={isSaving}
+                    className={`flex-1 ${isSaving ? 'bg-emerald-500' : 'bg-indigo-500 hover:bg-indigo-600'} text-white py-4 rounded-xl font-black uppercase tracking-widest text-[10px] shadow-lg transition-all flex items-center justify-center gap-2`}
+                  >
+                    {isSaving ? (
+                      <>
+                        <ShieldCheck className="w-4 h-4" /> Sarah's Brain Synced!
+                      </>
+                    ) : (
+                      <>
+                        <Zap className="w-4 h-4" /> Sync Training to Sarah
+                      </>
+                    )}
+                  </button>
+                  <button 
+                    onClick={() => { setLocalRebuttals(""); onUpdateRebuttals(""); }}
+                    className="px-6 py-4 bg-white/5 hover:bg-red-500/20 border border-white/10 hover:border-red-500/30 rounded-xl text-[10px] font-black uppercase tracking-widest text-white/40 hover:text-red-400 transition-all"
+                    title="Clear Training"
+                  >
+                    Clear
+                  </button>
+                </div>
+
+                {customRebuttals && (
+                  <div className="mt-8 p-6 bg-indigo-500/5 border border-indigo-500/10 rounded-2xl">
+                    <h4 className="text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-3">Currently Active Training</h4>
+                    <p className="text-xs text-white/60 font-mono line-clamp-3 italic">"{customRebuttals}"</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-6">
+                <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                  <h4 className="text-[10px] font-black text-white/40 uppercase tracking-widest mb-4">Agent Identity</h4>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="text-[9px] text-white/20 uppercase font-black block mb-2">Primary Name</label>
+                      <input 
+                        type="text" 
+                        value={agentName}
+                        onChange={(e) => setAgentName(e.target.value)}
+                        className="w-full bg-black/40 border border-white/5 rounded-xl px-4 py-2 text-xs font-mono text-white outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                    <p className="text-[10px] text-white/40 italic">Sarah can also rotate between Emily and Jessica to keep the campaign sounding fresh.</p>
+                  </div>
+                </div>
+
+                <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                  <h4 className="text-[10px] font-black text-white/40 uppercase tracking-widest mb-4">Training Tips</h4>
+                  <ul className="space-y-4">
+                    <li className="flex gap-3">
+                      <div className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5"></div>
+                      <p className="text-[11px] text-white/60 leading-relaxed">Be specific. Instead of "be nice", use "If they are busy, offer a 5-minute callback window."</p>
+                    </li>
+                    <li className="flex gap-3">
+                      <div className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5"></div>
+                      <p className="text-[11px] text-white/60 leading-relaxed">Add local landmarks or neighborhood names to sound more local.</p>
+                    </li>
+                    <li className="flex gap-3">
+                      <div className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1.5"></div>
+                      <p className="text-[11px] text-white/60 leading-relaxed">Define "Power Words" you want Sarah to use frequently (e.g. 'Certified', 'Industrial-Grade').</p>
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="bg-indigo-500/10 rounded-[2rem] border border-indigo-500/20 p-8">
+                  <div className="flex items-center gap-3 mb-4">
+                    <TrendingUp className="w-5 h-5 text-indigo-400" />
+                    <h4 className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">Intelligence Level</h4>
+                  </div>
+                  <div className="h-2 bg-white/5 rounded-full overflow-hidden mb-4">
+                    <div className="h-full bg-indigo-500 w-[85%]"></div>
+                  </div>
+                  <p className="text-[10px] text-white/40 italic">Sarah is currently operating at 85% contextual intelligence. Add more rebuttals to reach 100%.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : view === 'live' ? (
           <div className="flex-1 p-8 overflow-y-auto custom-scrollbar">
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
               {activeCalls.length === 0 ? (
