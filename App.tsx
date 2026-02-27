@@ -1,16 +1,13 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
-import { SYSTEM_INSTRUCTIONS, CHECK_CALENDAR_TOOL, BOOK_APPOINTMENT_TOOL } from './constants';
-import { Message, ToolCallLog } from './types';
+import { SYSTEM_INSTRUCTIONS, CHECK_CALENDAR_TOOL, BOOK_APPOINTMENT_TOOL, END_CALL_TOOL } from './constants';
+import { CallSession, CallDisposition } from './types';
+import { OrchestrationDashboard } from './src/components/Dashboard';
+import { Play, PhoneOff, Users, X, Settings } from 'lucide-react';
 
 function encode(bytes: Uint8Array) {
-  let binary = '';
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
+  return btoa(String.fromCharCode.apply(null, bytes as any));
 }
 
 function decode(base64: string) {
@@ -49,6 +46,16 @@ const App: React.FC = () => {
   const [isModelSpeaking, setIsModelSpeaking] = useState(false);
   const [selectedVoice, setSelectedVoice] = useState<'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr'>('Kore');
   const [showSettings, setShowSettings] = useState(false);
+  const [callLogs, setCallLogs] = useState<{ id: string; reason: string; timestamp: string }[]>([]);
+  const [lastAction, setLastAction] = useState<string | null>(null);
+  const [silenceDuration, setSilenceDuration] = useState(0);
+  const [isSafetyHangup, setIsSafetyHangup] = useState(false);
+  const [leadInfo, setLeadInfo] = useState<{ id: string; name: string; phone: string; address: string } | null>(null);
+  
+  // Orchestration State
+  const [activeCalls, setActiveCalls] = useState<CallSession[]>([]);
+  const [dispositions, setDispositions] = useState<CallDisposition[]>([]);
+  const [isCampaignActive, setIsCampaignActive] = useState(false);
 
   const sessionRef = useRef<any>(null);
   const inputAudioContextRef = useRef<AudioContext | null>(null);
@@ -60,6 +67,28 @@ const App: React.FC = () => {
   
   const currentInputTranscription = useRef('');
   const currentOutputTranscription = useRef('');
+
+  useEffect(() => {
+    // Simulate fetching lead data from VICIdial URL parameters
+    const params = new URLSearchParams(window.location.search);
+    const leadId = params.get('lead_id');
+    if (leadId) {
+      setLeadInfo({
+        id: leadId,
+        name: params.get('name') || "John Doe",
+        phone: params.get('phone') || "555-0123",
+        address: params.get('address') || "123 Neighborhood St"
+      });
+    } else {
+      // Demo data if no params
+      setLeadInfo({
+        id: "DEMO-99",
+        name: "Prospective Homeowner",
+        phone: "416-555-0199",
+        address: "Oakville, ON"
+      });
+    }
+  }, []);
 
   const stopSession = useCallback(() => {
     if (sessionRef.current) {
@@ -83,6 +112,87 @@ const App: React.FC = () => {
     setIsUserSpeaking(false);
   }, []);
 
+  useEffect(() => {
+    // If silence persists for too long and Sarah hasn't acted, the client takes over
+    if (silenceDuration > 12 && isActive) {
+      setIsSafetyHangup(true);
+      setLastAction("Neural Timeout: Sarah failed to detect hangup. Forcing disconnect.");
+      setCallLogs(prev => [{
+        id: Math.random().toString(36).substr(2, 9),
+        reason: 'hung_up_auto',
+        timestamp: new Date().toLocaleTimeString()
+      }, ...prev]);
+      
+      setTimeout(() => {
+        stopSession();
+        setIsSafetyHangup(false);
+        setLastAction(null);
+      }, 3000);
+    }
+  }, [silenceDuration, isActive, stopSession]);
+
+  // Campaign Simulation Logic
+  useEffect(() => {
+    let interval: any;
+    if (isCampaignActive) {
+      interval = setInterval(() => {
+        setActiveCalls(prev => {
+          // Update durations
+          const updated = prev.map(call => ({
+            ...call,
+            duration: call.duration + 1
+          }));
+
+          // Randomly finish calls and add new ones if under 20
+          const filtered = updated.filter(call => {
+            if (call.isLive) return true; // Don't auto-finish the real user call
+            const shouldFinish = Math.random() > 0.98;
+            if (shouldFinish) {
+              // Generate disposition for finished mock call
+              setDispositions(d => [{
+                LeadName: call.leadName,
+                Phone: call.phone,
+                Disposition: Math.random() > 0.7 ? 'Hot' : 'Warm',
+                ConvertibleScore: Math.floor(Math.random() * 40) + 60,
+                BookingProbability: "High",
+                ObjectionType: "None",
+                Sentiment: call.sentiment,
+                AppointmentBooked: true,
+                AppointmentDate: "2024-03-25",
+                FollowUpRequired: false,
+                CallDurationSeconds: Math.floor(call.duration),
+                Summary: "Successful outbound call. Customer interested in air duct cleaning package."
+              }, ...d]);
+              return false;
+            }
+            return true;
+          });
+
+          if (filtered.length < 20 && Math.random() > 0.7) {
+            const names = ["Alice Smith", "Bob Jones", "Charlie Brown", "Diana Prince", "Edward Norton", "Fiona Apple", "George Miller"];
+            const name = names[Math.floor(Math.random() * names.length)];
+            const newCall: CallSession = {
+              id: Math.random().toString(36).substr(2, 9),
+              leadName: name,
+              phone: `416-555-${Math.floor(Math.random() * 9000) + 1000}`,
+              address: `${Math.floor(Math.random() * 900) + 100} Maple St`,
+              startTime: Date.now(),
+              duration: 0,
+              status: 'AI_SPEAKING',
+              transcript: [`Sarah: Hello, is this ${name}?`, `Customer: Yes, who is this?`],
+              sentiment: Math.random() > 0.8 ? 'Frustrated' : 'Neutral',
+              convertibleScore: Math.floor(Math.random() * 100),
+              isLive: false
+            };
+            return [...filtered, newCall];
+          }
+          return filtered;
+        });
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [isCampaignActive]);
+
   const startSession = async () => {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -101,13 +211,13 @@ const App: React.FC = () => {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       const sessionPromise = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
+        model: 'gemini-2.5-flash-native-audio-preview-09-2025',
         config: {
           responseModalities: [Modality.AUDIO],
           systemInstruction: SYSTEM_INSTRUCTIONS,
-          tools: [{ functionDeclarations: [CHECK_CALENDAR_TOOL, BOOK_APPOINTMENT_TOOL] }],
-          inputAudioTranscription: {},
+          tools: [{ functionDeclarations: [CHECK_CALENDAR_TOOL, BOOK_APPOINTMENT_TOOL, END_CALL_TOOL] }],
           outputAudioTranscription: {},
+          inputAudioTranscription: {},
           speechConfig: {
             voiceConfig: { 
               prebuiltVoiceConfig: { 
@@ -119,16 +229,26 @@ const App: React.FC = () => {
         callbacks: {
           onopen: () => {
             const source = inputCtx.createMediaStreamSource(stream);
-            const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
+            const scriptProcessor = inputCtx.createScriptProcessor(2048, 1, 1);
             scriptProcessorRef.current = scriptProcessor;
             scriptProcessor.onaudioprocess = (e) => {
               const inputData = e.inputBuffer.getChannelData(0);
               const sum = inputData.reduce((a, b) => a + Math.abs(b), 0);
-              setIsUserSpeaking(sum / inputData.length > 0.01);
+              const volume = sum / inputData.length;
+              const isSpeaking = volume > 0.01;
+              setIsUserSpeaking(isSpeaking);
+              
+              if (!isSpeaking && isActive) {
+                setSilenceDuration(prev => prev + (2048 / 16000));
+              } else {
+                setSilenceDuration(0);
+              }
               
               const int16 = new Int16Array(inputData.length);
               for (let i = 0; i < inputData.length; i++) {
-                int16[i] = inputData[i] * 32768;
+                // Add tiny dither to keep the model's VAD active during silence
+                const dither = (Math.random() - 0.5) * 0.0002;
+                int16[i] = (inputData[i] + dither) * 32768;
               }
               
               sessionPromise.then(session => {
@@ -174,8 +294,61 @@ const App: React.FC = () => {
               nextStartTimeRef.current = 0;
             }
 
+            if ((message as any).serverContent?.modelTurn?.parts[0]?.text) {
+              const text = (message as any).serverContent.modelTurn.parts[0].text;
+              currentOutputTranscription.current += text;
+              setActiveCalls(prev => prev.map(c => c.id === 'live-session' ? {
+                ...c,
+                status: 'AI_SPEAKING',
+                transcript: [...c.transcript.slice(-10), `Sarah: ${text}`]
+              } : c));
+            }
+
+            if ((message as any).serverContent?.userTurn?.parts[0]?.text) {
+              const text = (message as any).serverContent.userTurn.parts[0].text;
+              currentInputTranscription.current += text;
+              setActiveCalls(prev => prev.map(c => c.id === 'live-session' ? {
+                ...c,
+                status: 'CUSTOMER_SPEAKING',
+                transcript: [...c.transcript.slice(-10), `Customer: ${text}`]
+              } : c));
+            }
+
             if (message.toolCall) {
               for (const fc of message.toolCall.functionCalls) {
+                if (fc.name === 'end_call') {
+                  const reason = (fc.args as any).reason || 'unknown';
+                  setLastAction(`Sarah detected: ${reason.replace('_', ' ')}`);
+                  setCallLogs(prev => [{
+                    id: Math.random().toString(36).substr(2, 9),
+                    reason: reason,
+                    timestamp: new Date().toLocaleTimeString()
+                  }, ...prev]);
+                  
+                  // Generate disposition
+                  setDispositions(d => [{
+                    LeadName: leadInfo?.name || "Prospective Homeowner",
+                    Phone: leadInfo?.phone || "416-555-0199",
+                    Disposition: reason === 'completed' ? 'Hot' : 'Not Interested',
+                    ConvertibleScore: reason === 'completed' ? 95 : 20,
+                    BookingProbability: reason === 'completed' ? "High" : "Low",
+                    ObjectionType: reason === 'hung_up' ? "Disconnected" : "None",
+                    Sentiment: 'Neutral',
+                    AppointmentBooked: reason === 'completed',
+                    AppointmentDate: reason === 'completed' ? "2024-03-25" : "",
+                    FollowUpRequired: reason !== 'completed',
+                    CallDurationSeconds: Math.floor(silenceDuration),
+                    Summary: `Call ended with status: ${reason}.`
+                  }, ...d]);
+
+                  setActiveCalls(prev => prev.filter(c => c.id !== 'live-session'));
+                  
+                  setTimeout(() => {
+                    stopSession();
+                    setLastAction(null);
+                  }, 3000);
+                  continue;
+                }
                 setTimeout(() => {
                   let result = { status: "success", message: "Action completed." };
                   sessionPromise.then(session => {
@@ -197,105 +370,149 @@ const App: React.FC = () => {
           }
         }
       });
-      sessionRef.current = await sessionPromise;
-      setIsActive(true);
+            sessionRef.current = await sessionPromise;
+            setIsActive(true);
+
+            // Add to active calls
+            const newCall: CallSession = {
+              id: 'live-session',
+              leadName: leadInfo?.name || "Prospective Homeowner",
+              phone: leadInfo?.phone || "416-555-0199",
+              address: leadInfo?.address || "Oakville, ON",
+              startTime: Date.now(),
+              duration: 0,
+              status: 'AI_SPEAKING',
+              transcript: [],
+              sentiment: 'Neutral',
+              convertibleScore: 50,
+              isLive: true
+            };
+            setActiveCalls(prev => [newCall, ...prev]);
     } catch (err: any) {
       console.error("Start session failed:", err);
       alert("Microphone access is required for the voice agent.");
     }
   };
 
+  const handleWhisper = (id: string) => {
+    setLastAction(`Whispering to agent on call ${id}...`);
+    setActiveCalls(prev => prev.map(c => c.id === id ? { ...c, status: 'WHISPER' } : c));
+    setTimeout(() => setLastAction(null), 3000);
+  };
+
+  const handleTakeover = (id: string) => {
+    setLastAction(`Taking over call ${id}...`);
+    setActiveCalls(prev => prev.map(c => c.id === id ? { ...c, status: 'TAKEOVER' } : c));
+    setTimeout(() => setLastAction(null), 3000);
+  };
+
+  const handleStopCall = (id: string) => {
+    if (id === 'live-session') {
+      stopSession();
+    } else {
+      setActiveCalls(prev => prev.filter(c => c.id !== id));
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-[#0A0A0B] flex flex-col items-center justify-center font-['Inter'] p-6 overflow-hidden">
-      {/* Background Glow */}
-      <div className={`fixed inset-0 transition-opacity duration-1000 pointer-events-none ${isActive ? 'opacity-20' : 'opacity-0'}`}>
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-indigo-500 rounded-full blur-[120px] animate-pulse"></div>
+    <div className="min-h-screen bg-[#050505] text-white flex flex-col overflow-hidden">
+      {/* Orchestration Dashboard */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <OrchestrationDashboard 
+          activeCalls={activeCalls}
+          dispositions={dispositions}
+          onWhisper={handleWhisper}
+          onTakeover={handleTakeover}
+          onListen={(id) => setLastAction(`Listening to call ${id}...`)}
+          onStop={handleStopCall}
+        />
       </div>
 
-      <div className="relative flex flex-col items-center w-full max-w-md">
-        {/* Settings Toggle */}
-        <button 
-          onClick={() => setShowSettings(!showSettings)}
-          className="absolute -top-20 right-0 p-3 text-white/20 hover:text-white/60 transition-colors"
-        >
-          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37a1.724 1.724 0 002.572-1.065z" />
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
-        </button>
+      {/* Control Bar */}
+      <div className="bg-black/40 border-t border-white/5 p-6 flex items-center justify-between backdrop-blur-xl">
+        <div className="flex items-center gap-6">
+          <button
+            onClick={isActive ? stopSession : startSession}
+            className={`px-8 py-3 rounded-2xl font-black uppercase tracking-widest text-xs transition-all flex items-center gap-3 shadow-2xl ${
+              isActive 
+                ? 'bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20' 
+                : 'bg-indigo-500 text-white hover:bg-indigo-600 shadow-indigo-500/20'
+            }`}
+          >
+            {isActive ? <PhoneOff className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+            {isActive ? "End Live Session" : "Start Live Session"}
+          </button>
 
-        {/* Settings Panel */}
-        <div className={`absolute -top-16 left-0 right-0 bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl p-4 transition-all duration-500 ${showSettings ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-4 pointer-events-none'}`}>
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-black text-white/40 uppercase tracking-widest">Select Voice Profile</span>
-            <select 
-              value={selectedVoice}
-              onChange={(e) => setSelectedVoice(e.target.value as any)}
-              disabled={isActive}
-              className="bg-transparent text-xs font-bold text-indigo-400 focus:outline-none cursor-pointer disabled:opacity-50"
+          <button
+            onClick={() => setIsCampaignActive(!isCampaignActive)}
+            className={`px-8 py-3 rounded-2xl font-black uppercase tracking-widest text-xs transition-all flex items-center gap-3 border ${
+              isCampaignActive 
+                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
+                : 'bg-white/5 text-white/40 border-white/10 hover:text-white'
+            }`}
+          >
+            <Users className="w-4 h-4" />
+            {isCampaignActive ? "Campaign Active" : "Simulate Campaign"}
+          </button>
+        </div>
+
+        <div className="flex items-center gap-8">
+          <div className="flex flex-col items-end">
+            <span className="text-[8px] text-white/30 uppercase font-black">System Load</span>
+            <span className="text-xs font-mono font-bold text-emerald-400">Optimal</span>
+          </div>
+          <div className="flex flex-col items-end">
+            <span className="text-[8px] text-white/30 uppercase font-black">AI Agents</span>
+            <span className="text-xs font-mono font-bold text-white">20 Ready</span>
+          </div>
+          <button 
+            onClick={() => setShowSettings(true)}
+            className="p-3 bg-white/5 hover:bg-white/10 rounded-xl border border-white/10 transition-all"
+          >
+            <Settings className="w-5 h-5 text-white/40" />
+          </button>
+        </div>
+      </div>
+
+      {/* Settings Overlay */}
+      {showSettings && (
+        <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-6">
+          <div className="bg-[#0a0a0a] border border-white/10 w-full max-w-md rounded-[2.5rem] p-10 relative shadow-2xl">
+            <button 
+              onClick={() => setShowSettings(false)}
+              className="absolute top-8 right-8 text-white/20 hover:text-white transition-colors"
             >
-              <option value="Kore">Kore (Standard)</option>
-              <option value="Puck">Puck (Energetic)</option>
-              <option value="Charon">Charon (Deep)</option>
-              <option value="Fenrir">Fenrir (Mellow)</option>
-              <option value="Zephyr">Zephyr (Soft)</option>
-            </select>
-          </div>
-        </div>
-
-        {/* Visualizer Ring */}
-        <div className={`absolute inset-0 -m-8 rounded-full border border-white/5 transition-all duration-1000 ${isActive ? 'scale-150 opacity-100' : 'scale-100 opacity-0'}`}>
-          <div className="absolute inset-0 rounded-full bg-indigo-500/10 blur-3xl animate-pulse"></div>
-        </div>
-
-        {/* Main Agent Button */}
-        <button
-          onClick={isActive ? stopSession : startSession}
-          className={`relative z-10 w-64 h-64 rounded-full flex flex-col items-center justify-center transition-all duration-500 active:scale-95 shadow-2xl ${
-            isActive 
-              ? 'bg-indigo-600 shadow-indigo-500/40' 
-              : 'bg-white/5 border border-white/10 hover:bg-white/10'
-          }`}
-        >
-          <div className={`mb-4 transition-transform duration-500 ${isActive ? 'scale-110' : 'scale-100'}`}>
-            <svg className={`w-16 h-16 ${isActive ? 'text-white' : 'text-white/40'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-            </svg>
-          </div>
-          
-          <span className={`text-[10px] font-black uppercase tracking-[0.3em] ${isActive ? 'text-indigo-200' : 'text-white/20'}`}>
-            {isActive ? 'Connected' : 'Start Call'}
-          </span>
-        </button>
-
-        {/* Status & Visualizer */}
-        <div className="mt-16 flex flex-col items-center space-y-6 min-h-[80px]">
-          <h2 className={`text-xl font-bold tracking-tight transition-colors duration-500 ${isActive ? 'text-white' : 'text-white/20'}`}>
-            {isUserSpeaking ? "Hearing..." : isModelSpeaking ? "Speaking..." : isActive ? "Sarah is Live" : "Neural Link Offline"}
-          </h2>
-          
-          {isActive && (
-            <div className="flex items-center gap-1.5 h-6">
-              {[...Array(12)].map((_, i) => (
-                <div 
-                  key={i} 
-                  className={`w-1 bg-indigo-400 rounded-full transition-all duration-300 ${isModelSpeaking || isUserSpeaking ? 'animate-pulse' : 'h-1'}`}
-                  style={{ 
-                    height: (isModelSpeaking || isUserSpeaking) ? `${30 + Math.random() * 70}%` : '4px',
-                    animationDelay: `${i * 0.05}s`
-                  }}
-                ></div>
-              ))}
+              <X className="w-6 h-6" />
+            </button>
+            <h2 className="text-2xl font-black uppercase tracking-tighter mb-8">Agent Config</h2>
+            <div className="space-y-6">
+              <div>
+                <label className="text-[10px] font-black text-white/30 uppercase tracking-widest mb-3 block">Voice Profile</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {['Kore', 'Puck', 'Charon', 'Fenrir', 'Zephyr'].map((voice) => (
+                    <button
+                      key={voice}
+                      onClick={() => setSelectedVoice(voice as any)}
+                      className={`py-3 rounded-xl text-[10px] font-bold uppercase transition-all border ${
+                        selectedVoice === voice ? 'bg-indigo-500 border-indigo-400 text-white shadow-lg shadow-indigo-500/20' : 'bg-white/5 border-white/5 text-white/40 hover:text-white'
+                      }`}
+                    >
+                      {voice}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
-          )}
+          </div>
         </div>
-      </div>
+      )}
 
-      {/* Minimal Branding */}
-      <div className="absolute bottom-12 flex flex-col items-center opacity-20">
-        <span className="text-[10px] font-black uppercase tracking-[0.5em] text-white">Sarah.ai</span>
-        <span className="text-[8px] font-bold uppercase tracking-widest text-indigo-400 mt-2">Neural Sales Core 5.0</span>
-      </div>
+      {/* Intelligence / Action Toast */}
+      {lastAction && (
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[110] bg-indigo-500 text-white px-8 py-4 rounded-2xl shadow-2xl animate-bounce font-black text-xs uppercase tracking-widest">
+          {lastAction}
+        </div>
+      )}
     </div>
   );
 };
