@@ -10,6 +10,8 @@ export interface CallSession {
   sentiment: 'Positive' | 'Neutral' | 'Negative' | 'Frustrated';
   convertibleScore: number;
   isLive: boolean;
+  persona?: 'Friendly' | 'Busy' | 'Rude' | 'Skeptical' | 'Interested';
+  recordingUrl?: string;
 }
 
 export interface CallDisposition {
@@ -25,6 +27,7 @@ export interface CallDisposition {
   FollowUpRequired: boolean;
   CallDurationSeconds: number;
   Summary: string;
+  recordingUrl?: string;
 }
 
 export interface Message {

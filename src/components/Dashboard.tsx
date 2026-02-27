@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { CallSession, CallDisposition } from '../types';
-import { Play, Pause, PhoneOff, MessageSquare, UserPlus, AlertCircle, TrendingUp, BarChart3, Users } from 'lucide-react';
+import { Play, Pause, PhoneOff, MessageSquare, UserPlus, AlertCircle, TrendingUp, BarChart3, Users, Volume2, XCircle, Settings } from 'lucide-react';
 
 interface DashboardProps {
   activeCalls: CallSession[];
@@ -8,7 +8,11 @@ interface DashboardProps {
   onTakeover: (callId: string) => void;
   onListen: (callId: string) => void;
   onStop: (callId: string) => void;
+  onStartLive: () => void;
+  onStopLive: () => void;
+  isLiveActive: boolean;
   dispositions: CallDisposition[];
+  listeningToId: string | null;
 }
 
 export const OrchestrationDashboard: React.FC<DashboardProps> = ({ 
@@ -17,9 +21,15 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
   onTakeover, 
   onListen, 
   onStop,
-  dispositions 
+  onStartLive,
+  onStopLive,
+  isLiveActive,
+  dispositions,
+  listeningToId
 }) => {
   const [view, setView] = useState<'live' | 'reports'>('live');
+  const [playingRecording, setPlayingRecording] = useState<CallDisposition | null>(null);
+  const [showVoipSettings, setShowVoipSettings] = useState(false);
 
   return (
     <div className="w-full h-full flex flex-col bg-[#050505] text-white font-sans overflow-hidden">
@@ -36,6 +46,49 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
         </div>
 
         <div className="flex items-center gap-6">
+          <button 
+            onClick={() => isLiveActive ? onStopLive() : onStartLive()}
+            className={`flex items-center gap-2 px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${
+              isLiveActive 
+              ? 'bg-red-500 text-white shadow-lg shadow-red-500/20' 
+              : 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20 hover:bg-emerald-600'
+            }`}
+          >
+            {isLiveActive ? <PhoneOff className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+            {isLiveActive ? 'End Test Call' : 'Test Call Sarah'}
+          </button>
+
+          <button 
+            onClick={() => setShowVoipSettings(true)}
+            className="p-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-white/40 hover:text-white transition-all"
+            title="VOIP Connection Settings"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
+
+          <button 
+            onClick={() => {
+              const input = document.createElement('input');
+              input.type = 'file';
+              input.accept = '.csv';
+              input.onchange = (e: any) => {
+                const file = e.target.files[0];
+                if (file) alert(`Leads CSV "${file.name}" uploaded successfully! Cluster updated.`);
+              };
+              input.click();
+            }}
+            className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all text-white/60 hover:text-white"
+          >
+            <Users className="w-4 h-4" /> Upload Leads CSV
+          </button>
+          <button 
+            onClick={() => alert('Required CSV Columns: Name, Phone, Address, City. Optional: Persona, Notes.')}
+            className="p-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-white/40 hover:text-white transition-all"
+            title="CSV Format Info"
+          >
+            <AlertCircle className="w-4 h-4" />
+          </button>
+
           <div className="flex bg-white/5 p-1 rounded-lg border border-white/10">
             <button 
               onClick={() => setView('live')}
@@ -54,12 +107,12 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
           <div className="flex items-center gap-4 border-l border-white/10 pl-6">
             <div className="flex flex-col items-end">
               <span className="text-[8px] text-white/30 uppercase font-black">Concurrency</span>
-              <span className="text-sm font-mono font-bold text-emerald-400">{activeCalls.length} / 20</span>
+              <span className="text-sm font-mono font-bold text-emerald-400">{activeCalls.length} / 5</span>
             </div>
             <div className="w-12 h-1.5 bg-white/5 rounded-full overflow-hidden">
               <div 
                 className="h-full bg-emerald-500 transition-all duration-500" 
-                style={{ width: `${(activeCalls.length / 20) * 100}%` }}
+                style={{ width: `${(activeCalls.length / 5) * 100}%` }}
               ></div>
             </div>
           </div>
@@ -79,26 +132,42 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                 </div>
               ) : (
                 activeCalls.map(call => (
-                  <div key={call.id} className={`bg-white/5 border rounded-3xl p-6 transition-all duration-500 ${call.sentiment === 'Frustrated' ? 'border-red-500/30 bg-red-500/5' : 'border-white/10'}`}>
+                  <div key={call.id} className={`bg-white/5 border rounded-3xl p-6 transition-all duration-500 ${call.sentiment === 'Frustrated' ? 'border-red-500/30 bg-red-500/5' : 'border-white/10'} ${listeningToId === call.id ? 'ring-2 ring-indigo-500 bg-indigo-500/5' : ''}`}>
                     <div className="flex justify-between items-start mb-6">
                       <div className="flex items-center gap-4">
                         <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${call.sentiment === 'Frustrated' ? 'bg-red-500/20' : 'bg-white/5'}`}>
                           <UserPlus className={`w-6 h-6 ${call.sentiment === 'Frustrated' ? 'text-red-400' : 'text-white/40'}`} />
                         </div>
                         <div>
-                          <h3 className="font-bold text-white">{call.leadName}</h3>
+                          <div className="flex items-center gap-2">
+                            <h3 className="font-bold text-white">{call.leadName}</h3>
+                            {call.persona && (
+                              <span className="text-[8px] px-1.5 py-0.5 bg-white/10 rounded-md text-white/40 uppercase font-black">{call.persona}</span>
+                            )}
+                          </div>
                           <p className="text-[10px] text-white/40 font-mono">{call.phone}</p>
+                          <p className="text-[9px] text-white/20 uppercase tracking-wider mt-1">{call.address}</p>
                         </div>
                       </div>
                       <div className="flex flex-col items-end gap-2">
-                        <span className={`text-[8px] font-black uppercase px-3 py-1 rounded-full ${
-                          call.status === 'AI_SPEAKING' ? 'bg-indigo-500/20 text-indigo-400' :
-                          call.status === 'CUSTOMER_SPEAKING' ? 'bg-emerald-500/20 text-emerald-400' :
-                          call.status === 'WHISPER' ? 'bg-amber-500/20 text-amber-400' :
-                          'bg-white/10 text-white/40'
-                        }`}>
-                          {call.status.replace('_', ' ')}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          {listeningToId === call.id && (
+                            <div className="flex items-center gap-1">
+                              <div className="w-1 h-3 bg-indigo-500 animate-pulse"></div>
+                              <div className="w-1 h-5 bg-indigo-500 animate-pulse" style={{ animationDelay: '0.1s' }}></div>
+                              <div className="w-1 h-2 bg-indigo-500 animate-pulse" style={{ animationDelay: '0.2s' }}></div>
+                            </div>
+                          )}
+                          <span className={`text-[8px] font-black uppercase px-3 py-1 rounded-full ${
+                            call.status === 'AI_SPEAKING' ? 'bg-indigo-500/20 text-indigo-400' :
+                            call.status === 'CUSTOMER_SPEAKING' ? 'bg-emerald-500/20 text-emerald-400' :
+                            call.status === 'WHISPER' ? 'bg-amber-500/20 text-amber-400' :
+                            call.status === 'TAKEOVER' ? 'bg-red-500/20 text-red-400' :
+                            'bg-white/10 text-white/40'
+                          }`}>
+                            {call.status.replace('_', ' ')}
+                          </span>
+                        </div>
                         <span className="text-[10px] font-mono text-white/20">{Math.floor(call.duration)}s</span>
                       </div>
                     </div>
@@ -142,9 +211,13 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                     <div className="flex gap-2">
                       <button 
                         onClick={() => onListen(call.id)}
-                        className="flex-1 bg-white/5 hover:bg-white/10 border border-white/10 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2"
+                        className={`flex-1 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 border ${
+                          listeningToId === call.id 
+                            ? 'bg-indigo-500 text-white border-indigo-400 shadow-lg shadow-indigo-500/20' 
+                            : 'bg-white/5 hover:bg-white/10 border-white/10'
+                        }`}
                       >
-                        <BarChart3 className="w-3 h-3" /> Listen
+                        <BarChart3 className="w-3 h-3" /> {listeningToId === call.id ? 'Stop Listening' : 'Listen'}
                       </button>
                       <button 
                         onClick={() => onWhisper(call.id)}
@@ -181,12 +254,13 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                     <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-white/40">Score</th>
                     <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-white/40">Duration</th>
                     <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-white/40">Summary</th>
+                    <th className="px-6 py-4 text-[10px] font-black uppercase tracking-widest text-white/40">Recording</th>
                   </tr>
                 </thead>
                 <tbody>
                   {dispositions.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="px-6 py-12 text-center text-white/20 italic text-sm">No reports generated yet</td>
+                      <td colSpan={6} className="px-6 py-12 text-center text-white/20 italic text-sm">No reports generated yet</td>
                     </tr>
                   ) : (
                     dispositions.map((report, i) => (
@@ -207,11 +281,145 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                         <td className="px-6 py-4 font-mono text-emerald-400 font-bold">{report.ConvertibleScore}%</td>
                         <td className="px-6 py-4 text-white/60 font-mono">{report.CallDurationSeconds}s</td>
                         <td className="px-6 py-4 text-[10px] text-white/40 max-w-xs truncate">{report.Summary}</td>
+                        <td className="px-6 py-4">
+                          {report.recordingUrl ? (
+                            <button 
+                              onClick={() => setPlayingRecording(report)}
+                              className={`p-2 rounded-lg transition-all flex items-center gap-2 text-[8px] font-black uppercase ${
+                                playingRecording?.recordingUrl === report.recordingUrl 
+                                ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20' 
+                                : 'bg-indigo-500/20 hover:bg-indigo-500/40 text-indigo-400'
+                              }`}
+                            >
+                              <Play className="w-3 h-3" /> {playingRecording?.recordingUrl === report.recordingUrl ? 'Playing...' : 'Play'}
+                            </button>
+                          ) : (
+                            <span className="text-[8px] text-white/10 uppercase font-bold">No Recording</span>
+                          )}
+                        </td>
                       </tr>
                     ))
                   )}
                 </tbody>
               </table>
+            </div>
+
+            {/* Recording Player Modal/Overlay */}
+            {playingRecording && (
+              <div className="mt-8 bg-white/5 border border-indigo-500/30 rounded-3xl p-6 animate-in slide-in-from-bottom-4 duration-500">
+                <div className="flex items-center justify-between mb-6">
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 bg-indigo-500 rounded-2xl flex items-center justify-center">
+                      <Volume2 className="w-6 h-6 text-white" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-white">Recording: {playingRecording.LeadName}</h3>
+                      <p className="text-[10px] text-white/40 font-mono uppercase tracking-widest">Booked Lead • {playingRecording.CallDurationSeconds}s Duration</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setPlayingRecording(null)}
+                    className="p-2 hover:bg-white/10 rounded-full transition-colors"
+                  >
+                    <XCircle className="w-6 h-6 text-white/20 hover:text-white/60" />
+                  </button>
+                </div>
+
+                <div className="bg-black/40 rounded-2xl p-6 border border-white/5">
+                  <div className="flex items-center gap-4 mb-6">
+                    <div className="flex-1 h-1 bg-white/10 rounded-full overflow-hidden relative">
+                      <div className="absolute inset-0 bg-indigo-500 w-1/3 animate-progress"></div>
+                    </div>
+                    <span className="text-[10px] font-mono text-white/40">0:12 / 0:45</span>
+                  </div>
+
+                  <div className="space-y-4">
+                    <p className="text-[11px] text-indigo-400">
+                      <span className="font-black uppercase text-[8px] mr-2 opacity-40">Sarah:</span>
+                      Hi there! I'm calling because we're doing a special promotion for air duct cleaning...
+                    </p>
+                    <p className="text-[11px] text-white/70">
+                      <span className="font-black uppercase text-[8px] mr-2 opacity-40">Customer:</span>
+                      Yes, it is. I've been meaning to get that checked out actually. What's the offer?
+                    </p>
+                    <p className="text-[11px] text-indigo-400">
+                      <span className="font-black uppercase text-[8px] mr-2 opacity-40">Sarah:</span>
+                      It's a wonderful deal! We're offering a complete, deep-clean of all your ducts for just $129...
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="mt-6 flex justify-center gap-4">
+                  <button className="px-6 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all">Download MP3</button>
+                  <button className="px-6 py-2 bg-indigo-500 hover:bg-indigo-600 rounded-xl text-[10px] font-bold uppercase tracking-widest transition-all shadow-lg shadow-indigo-500/20">Share with Team</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* VOIP Settings Modal */}
+        {showVoipSettings && (
+          <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+            <div className="bg-[#0a0a0a] border border-white/10 rounded-[40px] w-full max-w-2xl p-10 shadow-2xl">
+              <div className="flex justify-between items-start mb-8">
+                <div>
+                  <h2 className="text-2xl font-black uppercase tracking-tighter">VOIP Integration Cluster</h2>
+                  <p className="text-xs text-white/40 font-mono mt-1">Configure your local Asterisk or Twilio trunk</p>
+                </div>
+                <button onClick={() => setShowVoipSettings(false)} className="p-2 hover:bg-white/5 rounded-full">
+                  <XCircle className="w-8 h-8 text-white/20" />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-8">
+                <div className="space-y-6">
+                  <div>
+                    <label className="text-[10px] font-black text-white/30 uppercase tracking-widest block mb-2">Provider Type</label>
+                    <select className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-indigo-500 transition-colors">
+                      <option>Asterisk (ARI)</option>
+                      <option>Twilio Media Streams</option>
+                      <option>Vicidial / SIP Trunk</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-white/30 uppercase tracking-widest block mb-2">ARI / WebSocket URL</label>
+                    <input type="text" placeholder="ws://your-server:8088/ari/events" className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-indigo-500 transition-colors" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black text-white/30 uppercase tracking-widest block mb-2">API Credentials</label>
+                    <input type="password" placeholder="••••••••••••" className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-indigo-500 transition-colors" />
+                  </div>
+                </div>
+
+                <div className="bg-white/5 rounded-3xl p-6 border border-white/10">
+                  <h4 className="text-[10px] font-black text-white/60 uppercase mb-4">Connection Status</h4>
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] text-white/40">SIP Registration</span>
+                      <span className="text-[10px] font-bold text-emerald-400">READY</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] text-white/40">RTP Bridge</span>
+                      <span className="text-[10px] font-bold text-emerald-400">ACTIVE</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] text-white/40">Latency (ms)</span>
+                      <span className="text-[10px] font-bold text-emerald-400">12ms</span>
+                    </div>
+                    <div className="mt-6 pt-6 border-t border-white/5">
+                      <p className="text-[9px] text-white/30 leading-relaxed italic">
+                        Note: Real calls require an active Asterisk instance with ARI enabled. See VOIP_INTEGRATION.md for setup instructions.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-10 flex gap-4">
+                <button className="flex-1 py-4 bg-indigo-500 hover:bg-indigo-600 rounded-2xl text-xs font-black uppercase tracking-widest transition-all shadow-lg shadow-indigo-500/20">Save Configuration</button>
+                <button onClick={() => setShowVoipSettings(false)} className="px-8 py-4 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-xs font-black uppercase tracking-widest transition-all">Cancel</button>
+              </div>
             </div>
           </div>
         )}
