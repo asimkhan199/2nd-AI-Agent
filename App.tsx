@@ -1,6 +1,7 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
+import { io, Socket } from 'socket.io-client';
 import { getSystemInstructions, CHECK_CALENDAR_TOOL, BOOK_APPOINTMENT_TOOL, END_CALL_TOOL } from './constants';
 import { CallSession, CallDisposition } from './types';
 import { OrchestrationDashboard } from './src/components/Dashboard';
@@ -62,8 +63,39 @@ const App: React.FC = () => {
   const [appointments, setAppointments] = useState<any[]>([]);
   const [cacheStats, setCacheStats] = useState({ hits: 0, misses: 0 });
   const [dailyCost, setDailyCost] = useState(0);
+  const socketRef = useRef<Socket | null>(null);
   const voiceCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
   const spokenLinesRef = useRef<Set<string>>(new Set());
+
+  // --- Real-Time Backend Sync ---
+  useEffect(() => {
+    const socket = io();
+    socketRef.current = socket;
+
+    socket.on('init', (data) => {
+      setUploadedLeads(new Array(data.leads.total).fill({}));
+      setActiveCalls(data.activeCalls);
+      setDispositions(data.dispositions);
+      setAppointments(data.appointments);
+    });
+
+    socket.on('call:started', (call) => {
+      setActiveCalls(prev => [call, ...prev]);
+    });
+
+    socket.on('call:ended', (disposition) => {
+      setActiveCalls(prev => prev.filter(c => c.id !== disposition.id));
+      setDispositions(prev => [disposition, ...prev].slice(0, 100));
+    });
+
+    socket.on('leads:update', (data) => {
+      setUploadedLeads(new Array(data.total).fill({}));
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, []);
 
   // Handle simulation audio with high-quality Gemini TTS to match Test Call quality
   useEffect(() => {
@@ -251,223 +283,29 @@ const App: React.FC = () => {
     }
   }, [silenceDuration, isActive, stopSession]);
 
-  // Campaign Simulation Logic
+  // Campaign Simulation Logic removed in favor of backend dialer
   useEffect(() => {
-    let interval: any;
-    if (isCampaignActive) {
-      interval = setInterval(() => {
-        setActiveCalls(prev => {
-          // Update durations and simulate conversation flow
-          const updated = prev.map(call => {
-            const minuteCost = (1/60) * 0.01; // $0.01 per minute for Live API
-            setDailyCost(d => d + minuteCost);
-            const currentCost = (call.cost || 0) + minuteCost;
-
-            if (call.isLive) return { ...call, duration: call.duration + 1, cost: currentCost };
-            
-            const newDuration = call.duration + 1;
-            let newTranscript = [...call.transcript];
-            let newStatus = call.status;
-            let newSentiment = call.sentiment;
-
-            const names = ['Sarah', 'Emily', 'Jessica'];
-            const agentName = names[Math.floor(Math.random() * names.length)];
-            
-            // Simulate conversation steps every 8 seconds for more realism
-            if (newDuration % 8 === 0) {
-              const step = Math.floor(newDuration / 8);
-              let newLine = "";
-              
-              if (step === 1) {
-                // Try to find a custom opening
-                const customOpening = customRebuttals.match(/opening:?\s*(.*)/i)?.[1] || 
-                                     (customRebuttals.toLowerCase().includes('hi') ? customRebuttals.split('\n')[0] : null);
-                  
-                newLine = `${agentName}: ${customOpening || `Hi there! I'm calling from Envision Services because we're doing a special promotion for air duct cleaning in your area today. Is this the homeowner?`}`;
-                newStatus = 'AI_SPEAKING';
-              } else if (step === 2) {
-                if (call.persona === 'Friendly') {
-                  newLine = `Customer: Yes, it is. I've been meaning to get that checked out actually. What's the offer?`;
-                  newSentiment = 'Positive';
-                } else if (call.persona === 'Busy') {
-                  newLine = `Customer: Yes, but I'm quite busy. Can you give me the highlights?`;
-                  newSentiment = 'Neutral';
-                } else if (call.persona === 'Rude') {
-                  newLine = `Customer: Not interested. Don't call this number again.`;
-                  newSentiment = 'Frustrated';
-                } else if (call.persona === 'Skeptical') {
-                  newLine = `Customer: I get these calls all the time. Why should I choose you?`;
-                  newSentiment = 'Negative';
-                } else {
-                  newLine = `Customer: Yes, how much is the service?`;
-                  newSentiment = 'Neutral';
-                }
-                newStatus = 'CUSTOMER_SPEAKING';
-              } else if (step === 3) {
-                if (newSentiment === 'Frustrated') {
-                  newLine = `${agentName}: I completely understand, and I certainly don't want to take up any more of your time. I'll make sure you're removed from our list. Have a lovely day!`;
-                } else if (newSentiment === 'Negative') {
-                  // Check for custom rebuttal for "skepticism"
-                  const customSkeptic = customRebuttals.match(/skeptic:?\s*(.*)/i)?.[1] || null;
-                  newLine = `${agentName}: ${customSkeptic || `I totally get that skepticism! We're actually a local, family-owned business with over 500 five-star reviews. We're doing a full-house deep clean for just $129 today—it's our best rate of the season.`}`;
-                } else {
-                  // Check for custom offer
-                  const customOffer = customRebuttals.match(/offer:?\s*(.*)/i)?.[1] || 
-                                     customRebuttals.match(/\$(\d+)/)?.[0] || 
-                                     null;
-                  newLine = `${agentName}: ${customOffer ? `It's a wonderful deal! We're offering a complete, deep-clean of all your ducts for just ${customOffer}. We actually have a crew finishing up a job on your street right now and could fit you in this afternoon.` : `It's a wonderful deal! We're offering a complete, deep-clean of all your ducts for just $129. We actually have a crew finishing up a job on your street right now and could fit you in this afternoon.`}`;
-                }
-                newStatus = 'AI_SPEAKING';
-              } else if (step === 4 && newSentiment !== 'Frustrated') {
-                const times = ["4:30 PM", "5:00 PM", "tomorrow at 10 AM", "this Saturday", "Friday afternoon"];
-                const selectedTime = times[Math.floor(Math.random() * times.length)];
-                if (call.persona === 'Friendly' || call.persona === 'Interested') {
-                  newLine = `Customer: $129 for the whole house? That's actually a great price. Do you have anything available ${selectedTime}?`;
-                  newSentiment = 'Positive';
-                } else if (call.persona === 'Skeptical') {
-                  newLine = `Customer: $129? Are there any hidden fees for the furnace or the returns?`;
-                  newSentiment = 'Negative';
-                } else {
-                  newLine = `Customer: I'll need to check the family calendar. Can you call me back later?`;
-                  newSentiment = 'Neutral';
-                }
-                newStatus = 'CUSTOMER_SPEAKING';
-              } else if (step === 5 && newSentiment === 'Positive') {
-                const confirmedTime = newTranscript.find(l => l.includes('available'))?.split('available ')[1]?.replace('?', '') || "4:30 PM";
-                newLine = `${agentName}: We can absolutely make ${confirmedTime} work for you! I'll get that all locked in. I just want to double-check, your address is ${call.address}, correct?`;
-                newStatus = 'AI_SPEAKING';
-              } else if (step === 6 && newSentiment === 'Positive') {
-                newLine = `Customer: Yes, that's correct. See you then!`;
-                newStatus = 'CUSTOMER_SPEAKING';
-              } else if (step === 7 && newSentiment === 'Positive') {
-                const confirmedTime = newTranscript.find(l => l.includes('make'))?.split('make ')[1]?.split(' work')[0] || "4:30 PM";
-                newLine = `${agentName}: Perfect! You're all set for ${confirmedTime}. Our technician will give you a quick call when they're 15 minutes away. Have a wonderful rest of your day!`;
-                newStatus = 'AI_SPEAKING';
-              }
-              else if (step === 5 && newSentiment === 'Negative') {
-                newLine = `${agentName}: That's a great question! No, that $129 is all-inclusive for up to 15 vents. No hidden fees, no surprises. I'd love to show you why our customers love us. Shall we try a slot this afternoon?`;
-                newStatus = 'AI_SPEAKING';
-              }
-
-              if (newLine) {
-                newTranscript.push(newLine);
-              }
-            }
-
-            return {
-              ...call,
-              duration: newDuration,
-              transcript: newTranscript.slice(-10),
-              status: newStatus,
-              sentiment: newSentiment,
-              cost: currentCost
-            };
-          });
-
-          // Randomly finish calls and add new ones if under 5
-          const filtered = updated.filter(call => {
-            if (call.isLive) return true;
-            // Longer durations to prevent "dropping" while listening
-            const shouldFinish = (call.duration > 80) || (call.sentiment === 'Frustrated' && call.duration > 30);
-            if (shouldFinish) {
-              const isBooked = call.sentiment === 'Positive' && call.duration > 40;
-              const recUrl = isBooked ? `https://storage.googleapis.com/sarah-recordings/${call.id}.mp3` : undefined;
-              
-              if (isBooked) {
-                const newAppt = {
-                  id: call.id,
-                  firstName: call.leadName.split(' ')[0],
-                  lastName: call.leadName.split(' ')[1] || '',
-                  address: call.address,
-                  phone: call.phone,
-                  time: "2024-03-25 10:00 AM",
-                  price: "$129",
-                  recordingUrl: recUrl,
-                  description: `Air Duct Cleaning for ${call.leadName}. Price: $129. Confirmed via automated campaign.`
-                };
-                setAppointments(prev => [newAppt, ...prev]);
-              }
-
-              setDispositions(d => [{
-                LeadName: call.leadName,
-                Phone: call.phone,
-                Disposition: isBooked ? 'Hot' : 'Not Interested',
-                ConvertibleScore: isBooked ? 98 : 12,
-                BookingProbability: isBooked ? "High" : "Low",
-                ObjectionType: isBooked ? "None" : (call.persona === 'Rude' ? "DNC" : "Price"),
-                Sentiment: call.sentiment,
-                AppointmentBooked: isBooked,
-                AppointmentDate: isBooked ? "2024-03-25" : "",
-                FollowUpRequired: !isBooked && call.persona !== 'Rude',
-                CallDurationSeconds: Math.floor(call.duration),
-                Summary: isBooked ? "Confirmed booking for $129 deep clean." : "Call ended without booking.",
-                recordingUrl: recUrl,
-                cost: call.cost
-              }, ...d]);
-              if (listeningToId === call.id) {
-                setListeningToId(null);
-              }
-              return false;
-            }
-            return true;
-          });
-
-          if (filtered.length < 5 && Math.random() > 0.5) {
-            let name, phone, address, persona;
-            
-            if (uploadedLeads.length > 0) {
-              const leadIndex = Math.floor(Math.random() * uploadedLeads.length);
-              const lead = uploadedLeads[leadIndex];
-              name = lead.Name || lead.name || "John Miller";
-              phone = lead.Phone || lead.phone || `416-555-${Math.floor(Math.random() * 9000) + 1000}`;
-              address = lead.Address || lead.address || `${Math.floor(Math.random() * 900) + 100} Oak Ave`;
-              persona = lead.Persona || lead.persona || ['Friendly', 'Busy', 'Rude', 'Skeptical', 'Interested'][Math.floor(Math.random() * 5)];
-            } else {
-              const names = ["John Miller", "Sarah Connor", "Robert Paulson", "Ellen Ripley", "James Bond", "Bruce Wayne", "Clark Kent"];
-              const personas: any[] = ['Friendly', 'Busy', 'Rude', 'Skeptical', 'Interested'];
-              name = names[Math.floor(Math.random() * names.length)];
-              persona = personas[Math.floor(Math.random() * personas.length)];
-              phone = `416-555-${Math.floor(Math.random() * 9000) + 1000}`;
-              address = `${Math.floor(Math.random() * 900) + 100} Oak Ave`;
-            }
-            
-            const newCall: CallSession = {
-              id: Math.random().toString(36).substr(2, 9),
-              leadName: name,
-              phone: phone,
-              address: address,
-              startTime: Date.now(),
-              duration: 0,
-              status: 'AI_SPEAKING',
-              transcript: [`Sarah: Hello, is this ${name}?`, `Customer: Yes, who is this?`],
-              sentiment: 'Neutral',
-              convertibleScore: 50,
-              isLive: false,
-              persona: persona
-            };
-            return [...filtered, newCall];
-          }
-          return filtered;
-        });
-      }, 1000);
-    } else {
+    if (!isCampaignActive) {
       setActiveCalls(prev => prev.filter(c => c.isLive));
       setListeningToId(null);
       window.speechSynthesis.cancel();
       spokenLinesRef.current.clear();
     }
-    return () => {
-      clearInterval(interval);
-      window.speechSynthesis.cancel();
-    };
-  }, [isCampaignActive, listeningToId, customRebuttals]);
+  }, [isCampaignActive]);
 
   const startSession = async () => {
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+      if (!apiKey) {
+        throw new Error("Gemini API Key not found. Please ensure it is set in the environment.");
+      }
+      const ai = new GoogleGenAI({ apiKey });
       
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      
+      await inputCtx.resume();
+      await outputCtx.resume();
       
       const analyser = outputCtx.createAnalyser();
       analyser.fftSize = 256;
@@ -536,42 +374,52 @@ const App: React.FC = () => {
         },
         callbacks: {
           onopen: () => {
-            const source = inputCtx.createMediaStreamSource(stream);
-            const scriptProcessor = inputCtx.createScriptProcessor(2048, 1, 1);
-            scriptProcessorRef.current = scriptProcessor;
-            scriptProcessor.onaudioprocess = (e) => {
-              const inputData = e.inputBuffer.getChannelData(0);
-              const sum = inputData.reduce((a, b) => a + Math.abs(b), 0);
-              const volume = sum / inputData.length;
-              const isSpeaking = volume > 0.01;
-              setIsUserSpeaking(isSpeaking);
-              
-              if (!isSpeaking && isActive) {
-                setSilenceDuration(prev => prev + (2048 / 16000));
-              } else {
-                setSilenceDuration(0);
+            sessionPromise.then(session => {
+              // Trigger Sarah to start the conversation
+              try {
+                (session as any).sendRealtimeInput({
+                  text: "Hi Sarah, you are now live on a call with a homeowner. Please start the conversation by introducing yourself and your offer as per your instructions."
+                });
+              } catch (e) {
+                console.warn("Could not send initial text trigger:", e);
               }
-              
-              const int16 = new Int16Array(inputData.length);
-              for (let i = 0; i < inputData.length; i++) {
-                // Add tiny dither to keep the model's VAD active during silence
-                const dither = (Math.random() - 0.5) * 0.0002;
-                int16[i] = (inputData[i] + dither) * 32768;
-              }
-              
-              sessionPromise.then(session => {
+
+              const source = inputCtx.createMediaStreamSource(stream);
+              const scriptProcessor = inputCtx.createScriptProcessor(2048, 1, 1);
+              scriptProcessorRef.current = scriptProcessor;
+              scriptProcessor.onaudioprocess = (e) => {
+                const inputData = e.inputBuffer.getChannelData(0);
+                const sum = inputData.reduce((a, b) => a + Math.abs(b), 0);
+                const volume = sum / inputData.length;
+                const isSpeaking = volume > 0.01;
+                setIsUserSpeaking(isSpeaking);
+                
+                if (!isSpeaking && isActive) {
+                  setSilenceDuration(prev => prev + (2048 / 16000));
+                } else {
+                  setSilenceDuration(0);
+                }
+                
+                const int16 = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                  // Add tiny dither to keep the model's VAD active during silence
+                  const dither = (Math.random() - 0.5) * 0.0002;
+                  int16[i] = (inputData[i] + dither) * 32768;
+                }
+                
                 session.sendRealtimeInput({ 
                   media: { 
                     data: encode(new Uint8Array(int16.buffer)), 
                     mimeType: 'audio/pcm;rate=16000' 
                   } 
                 });
-              });
-            };
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(inputCtx.destination);
+              };
+              source.connect(scriptProcessor);
+              scriptProcessor.connect(inputCtx.destination);
+            });
           },
           onmessage: async (message: LiveServerMessage) => {
+            console.log("[Sarah] Message received:", message);
             const audioData = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
             if (audioData && outputCtx && analyserRef.current) {
               nextStartTimeRef.current = Math.max(nextStartTimeRef.current, outputCtx.currentTime);
@@ -779,9 +627,19 @@ const App: React.FC = () => {
           onStartLive={startSession}
           onStopLive={stopSession}
           cacheStats={cacheStats}
-          onUploadLeads={(leads) => {
-            setUploadedLeads(leads);
-            setLastAction(`Database Updated: ${leads.length} Leads Ready for Sarah.`);
+          onUploadLeads={async (leads) => {
+            try {
+              const res = await fetch('/api/leads/upload', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ leads })
+              });
+              if (res.ok) {
+                setLastAction(`Database Updated: ${leads.length} Leads Ready for Sarah.`);
+              }
+            } catch (err) {
+              console.error("Upload failed:", err);
+            }
             setTimeout(() => setLastAction(null), 3000);
           }}
           customRebuttals={customRebuttals}
@@ -795,6 +653,7 @@ const App: React.FC = () => {
           listeningToId={listeningToId}
           appointments={appointments}
           onUpdateAppointments={setAppointments}
+          uploadedLeads={uploadedLeads}
         />
       </div>
 
@@ -811,18 +670,6 @@ const App: React.FC = () => {
           >
             {isActive ? <PhoneOff className="w-4 h-4" /> : <Play className="w-4 h-4" />}
             {isActive ? "End Live Session" : "Start Live Session"}
-          </button>
-
-          <button
-            onClick={() => setIsCampaignActive(!isCampaignActive)}
-            className={`px-8 py-3 rounded-2xl font-black uppercase tracking-widest text-xs transition-all flex items-center gap-3 border ${
-              isCampaignActive 
-                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
-                : 'bg-white/5 text-white/40 border-white/10 hover:text-white'
-            }`}
-          >
-            <Users className="w-4 h-4" />
-            {isCampaignActive ? "Campaign Active" : "Simulate Campaign"}
           </button>
         </div>
 
