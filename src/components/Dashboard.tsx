@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { CallSession, CallDisposition } from '../types';
-import { Play, Pause, PhoneOff, MessageSquare, UserPlus, AlertCircle, TrendingUp, BarChart3, Users, Volume2, XCircle, Settings, Globe, ShieldCheck, Zap, Calendar as CalendarIcon, Clock, MapPin, Phone, Activity, CheckCircle, Database, Search } from 'lucide-react';
+import { Play, Pause, PhoneOff, MessageSquare, UserPlus, AlertCircle, TrendingUp, BarChart3, Users, Volume2, XCircle, Settings, Globe, ShieldCheck, ShieldAlert, Zap, Calendar as CalendarIcon, Clock, MapPin, Phone, Activity, CheckCircle, Database, Search, Wifi, WifiOff, AlertTriangle, Link2 } from 'lucide-react';
 import Papa from 'papaparse';
+import * as JsSIP from 'jssip';
 
 interface DashboardProps {
   activeCalls: CallSession[];
@@ -13,19 +14,31 @@ interface DashboardProps {
   onStopLive: () => void;
   onUploadLeads: (leads: any[]) => void;
   onUpdateRebuttals: (text: string) => void;
+  onUpdateAgentName: (name: string) => void;
+  onUpdateScriptOffer: (offer: string) => void;
   customRebuttals: string;
+  agentName: string;
+  scriptOffer: string;
   dailyCost?: number;
   cacheStats?: { hits: number, misses: number };
   isLiveActive: boolean;
+  webrtcStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
   dispositions: CallDisposition[];
   listeningToId: string | null;
   appointments: any[];
   onUpdateAppointments: (appts: any[]) => void;
+  onConnectSip: () => void;
+  onMakeTestCall: (target?: string) => void;
   uploadedLeads: any[];
+  dialerConfig?: any;
+  sipLogs?: any[];
+  onClearSipLogs?: () => void;
+  onUpdateSipLogs?: (logs: any[] | ((prev: any[]) => any[])) => void;
+  onUpdateDialerConfig?: (config: any) => void;
 }
 
 export const OrchestrationDashboard: React.FC<DashboardProps> = ({ 
-  activeCalls, 
+  activeCalls = [], 
   onWhisper, 
   onTakeover, 
   onListen, 
@@ -34,37 +47,180 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
   onStopLive,
   onUploadLeads,
   onUpdateRebuttals,
+  onUpdateAgentName,
+  onUpdateScriptOffer,
   customRebuttals,
+  agentName: serverAgentName,
+  scriptOffer: serverScriptOffer,
   dailyCost = 0,
   cacheStats = { hits: 0, misses: 0 },
   isLiveActive,
-  dispositions,
+  webrtcStatus,
+  dispositions = [],
   listeningToId,
   appointments = [],
   onUpdateAppointments,
-  uploadedLeads = []
+  onConnectSip,
+  onMakeTestCall,
+  uploadedLeads = [],
+  dialerConfig,
+  sipLogs = [],
+  onClearSipLogs,
+  onUpdateSipLogs: setSipLogs,
+  onUpdateDialerConfig: setDialerConfig
 }) => {
-  const [view, setView] = useState<'live' | 'reports' | 'training' | 'costs' | 'calendar' | 'dialer'>('live');
-  const [dialerConfig, setDialerConfig] = useState({
-    concurrency: 5,
-    activeAgents: 20,
-    sipServer: '',
-    sipPort: '5060',
-    sipUser: '',
-    sipPass: '',
-    callerIds: ['+14165550199'],
-    status: 'idle'
+  const [outboundIp, setOutboundIp] = useState<string>('Detecting...');
+
+  useEffect(() => {
+    fetch('/api/server/ip')
+      .then(res => res.json())
+      .then(data => setOutboundIp(data.ip))
+      .catch(() => setOutboundIp('Error detecting'));
+  }, []);
+
+  const [view, setView] = useState<'live' | 'reports' | 'training' | 'calendar' | 'vicidial'>('live');
+  const [sipProfiles, setSipProfiles] = useState<any[]>(() => {
+    const saved = localStorage.getItem('sip_profiles');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
+  const [profileName, setProfileName] = useState<string>('');
+
+  useEffect(() => {
+    if (dialerConfig) {
+      localStorage.setItem('dialer_config', JSON.stringify(dialerConfig));
+    }
+  }, [dialerConfig]);
+
+  const [installStep, setInstallStep] = useState<number>(() => {
+    const saved = localStorage.getItem('install_step');
+    return saved ? parseInt(saved) : 0;
   });
 
-  const syncDialerConfig = async (newConfig: any) => {
+  useEffect(() => {
+    localStorage.setItem('install_step', installStep.toString());
+  }, [installStep]);
+
+  const [sarahIp, setSarahIp] = useState<string>('Detecting...');
+  const [webrtcLogs, setWebrtcLogs] = useState<string[]>([]);
+
+  useEffect(() => {
+    fetch('/api/server/ip')
+      .then(res => res.json())
+      .then(data => setSarahIp(data.ip))
+      .catch(() => setSarahIp('Unknown'));
+  }, []);
+
+  const addWebrtcLog = (msg: string) => {
+    setWebrtcLogs(prev => [msg, ...prev].slice(0, 10));
+  };
+
+  // Sync with local storage
+  useEffect(() => {
+    localStorage.setItem('sip_profiles', JSON.stringify(sipProfiles));
+  }, [sipProfiles]);
+
+  const saveProfile = () => {
+    const name = profileName.trim() || `Profile ${sipProfiles.length + 1}`;
+    const newProfile = {
+      id: activeProfileId || Math.random().toString(36).substr(2, 9),
+      name: name,
+      server: dialerConfig.sipServer,
+      port: dialerConfig.sipPort,
+      user: dialerConfig.sipUser,
+      pass: dialerConfig.sipPass,
+      wsUrl: dialerConfig.wsUrl,
+      webrtcUser: dialerConfig.webrtcUser,
+      webrtcPass: dialerConfig.webrtcPass
+    };
+    
+    if (activeProfileId) {
+      setSipProfiles(sipProfiles.map(p => p.id === activeProfileId ? newProfile : p));
+    } else {
+      setSipProfiles([...sipProfiles, newProfile]);
+      setActiveProfileId(newProfile.id);
+    }
+    setProfileName(name);
+    syncDialerConfig(dialerConfig);
+  };
+
+  const loadProfile = (id: string) => {
+    const profile = sipProfiles.find(p => p.id === id);
+    if (profile) {
+      const newConfig = {
+        ...dialerConfig,
+        sipServer: profile.server,
+        sipPort: profile.port,
+        sipUser: profile.user,
+        sipPass: profile.pass,
+        wsUrl: profile.wsUrl || '',
+        webrtcUser: profile.webrtcUser || '',
+        webrtcPass: profile.webrtcPass || ''
+      };
+      setDialerConfig(newConfig);
+      setActiveProfileId(id);
+      setProfileName(profile.name);
+      syncDialerConfig(newConfig);
+    }
+  };
+
+  const deleteProfile = (id: string) => {
+    setSipProfiles(sipProfiles.filter(p => p.id !== id));
+    if (activeProfileId === id) setActiveProfileId(null);
+  };
+
+  const [testExtension, setTestExtension] = useState('');
+  const [isTestCalling, setIsTestCalling] = useState(false);
+  const [sipTrace, setSipTrace] = useState<{ direction: 'in' | 'out', msg: string, time: string }[]>([]);
+
+  const addSipTrace = (direction: 'in' | 'out', msg: string, raw?: string) => {
+    setSipTrace(prev => [{ 
+      direction, 
+      msg, 
+      time: new Date().toLocaleTimeString(),
+      raw: raw || '' 
+    }, ...prev].slice(0, 20));
+  };
+  const [manualPhone, setManualPhone] = useState('');
+  const [isDialing, setIsDialing] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
+
+  const handleManualDial = async () => {
+    if (!manualPhone) return;
+    setIsDialing(true);
     try {
-      await fetch('/api/dialer/config', {
+      const res = await fetch('/api/dialer/manual-dial', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: manualPhone })
+      });
+      if (res.ok) {
+        setManualPhone('');
+      }
+    } catch (err) {
+      console.error("Dial failed:", err);
+    } finally {
+      setIsDialing(false);
+    }
+  };
+
+  const syncDialerConfig = async (newConfig: any) => {
+    setSaveStatus('saving');
+    try {
+      const res = await fetch('/api/dialer/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newConfig)
       });
+      if (res.ok) {
+        setSaveStatus('success');
+        setTimeout(() => setSaveStatus('idle'), 3000);
+      } else {
+        setSaveStatus('error');
+      }
     } catch (err) {
       console.error("Sync failed:", err);
+      setSaveStatus('error');
     }
   };
 
@@ -89,7 +245,7 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
     if (view === 'dialer') {
       const timer = setTimeout(() => {
         setSystemHealth({
-          sip: dialerConfig.sipServer ? 'healthy' : 'warning',
+          sip: dialerConfig.sipServer && dialerConfig.sipUser && dialerConfig.sipPass ? 'healthy' : 'warning',
           dialer: uploadedLeads.length > 0 ? 'healthy' : 'warning',
           api: 'healthy',
           latency: '24ms'
@@ -101,16 +257,27 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
   const [playingRecording, setPlayingRecording] = useState<CallDisposition | null>(null);
   const [showVoipSettings, setShowVoipSettings] = useState(false);
   const [localRebuttals, setLocalRebuttals] = useState(customRebuttals);
-  const [agentName, setAgentName] = useState('Sarah');
+  const [agentName, setAgentName] = useState(serverAgentName);
+  const [scriptOffer, setScriptOffer] = useState(serverScriptOffer);
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     setLocalRebuttals(customRebuttals);
   }, [customRebuttals]);
 
+  useEffect(() => {
+    setAgentName(serverAgentName);
+  }, [serverAgentName]);
+
+  useEffect(() => {
+    setScriptOffer(serverScriptOffer);
+  }, [serverScriptOffer]);
+
   const handleSync = () => {
     setIsSaving(true);
     onUpdateRebuttals(localRebuttals);
+    onUpdateAgentName(agentName);
+    onUpdateScriptOffer(scriptOffer);
     setTimeout(() => setIsSaving(false), 2000);
   };
 
@@ -149,6 +316,13 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
         </div>
 
         <div className="flex items-center gap-6">
+          <div className="flex flex-col items-end px-4 border-r border-white/10">
+            <span className="text-[8px] text-white/30 uppercase font-black tracking-widest">Live Calls</span>
+            <span className="text-sm font-mono font-bold text-emerald-400 flex items-center gap-2">
+              <Activity className="w-3 h-3 animate-pulse" /> {activeCalls.length} Active
+            </span>
+          </div>
+
           <button 
             onClick={() => isLiveActive ? onStopLive() : onStartLive()}
             className={`flex items-center gap-2 px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${
@@ -159,14 +333,6 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
           >
             {isLiveActive ? <PhoneOff className="w-4 h-4" /> : <Play className="w-4 h-4" />}
             {isLiveActive ? 'End Test Call' : 'Test Call Sarah'}
-          </button>
-
-          <button 
-            onClick={() => setShowVoipSettings(true)}
-            className="p-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-white/40 hover:text-white transition-all"
-            title="VOIP Connection Settings"
-          >
-            <Settings className="w-4 h-4" />
           </button>
 
           <div className="flex bg-white/5 p-1 rounded-lg border border-white/10">
@@ -189,22 +355,16 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
               Training Lab
             </button>
             <button 
-              onClick={() => setView('costs')}
-              className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${view === 'costs' ? 'bg-indigo-500 text-white shadow-lg' : 'text-white/40 hover:text-white'}`}
-            >
-              Cost Reports
-            </button>
-            <button 
               onClick={() => setView('calendar')}
               className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${view === 'calendar' ? 'bg-indigo-500 text-white shadow-lg' : 'text-white/40 hover:text-white'}`}
             >
               Calendar
             </button>
             <button 
-              onClick={() => setView('dialer')}
-              className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${view === 'dialer' ? 'bg-indigo-500 text-white shadow-lg' : 'text-white/40 hover:text-white'}`}
+              onClick={() => setView('vicidial')}
+              className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${view === 'vicidial' ? 'bg-emerald-500 text-white shadow-lg' : 'text-white/40 hover:text-white'}`}
             >
-              Dialer Control
+              Vicidial Link
             </button>
           </div>
 
@@ -230,6 +390,28 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
 
           <div className="flex items-center gap-4 border-l border-white/10 pl-6">
             <div className="flex flex-col items-end">
+              <span className="text-[8px] text-white/30 uppercase font-black">Sarah Status</span>
+              <div className="flex items-center gap-2">
+                <span className={`text-[10px] font-bold ${
+                  webrtcStatus === 'connected' ? 'text-emerald-400' : 
+                  webrtcStatus === 'connecting' ? 'text-amber-400' : 
+                  webrtcStatus === 'error' ? 'text-red-400' : 'text-white/20'
+                }`}>
+                  {webrtcStatus === 'connected' ? 'ONLINE' : 
+                   webrtcStatus === 'connecting' ? 'CONNECTING...' : 
+                   webrtcStatus === 'error' ? 'AUTH ERROR' : 'OFFLINE'}
+                </span>
+                <div className={`w-2 h-2 rounded-full ${
+                  webrtcStatus === 'connected' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 
+                  webrtcStatus === 'connecting' ? 'bg-amber-500 animate-pulse' : 
+                  webrtcStatus === 'error' ? 'bg-red-500' : 'bg-white/10'
+                }`}></div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4 border-l border-white/10 pl-6">
+            <div className="flex flex-col items-end">
               <span className="text-[8px] text-white/30 uppercase font-black">Concurrency</span>
               <span className="text-sm font-mono font-bold text-emerald-400">{activeCalls.length} / 5</span>
             </div>
@@ -245,7 +427,643 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
 
       {/* Main Content */}
       <div className="flex-1 overflow-hidden flex">
-        {view === 'costs' ? (
+        {view === 'sip-config' ? (
+          <div className="flex-1 p-8 overflow-y-auto custom-scrollbar flex flex-col">
+            <div className="flex items-center gap-6 mb-8">
+              <div className="w-16 h-16 bg-emerald-500/10 rounded-2xl flex items-center justify-center border border-emerald-500/20">
+                <Globe className="w-8 h-8 text-emerald-400" />
+              </div>
+              <div>
+                <h2 className="text-3xl font-black uppercase tracking-tighter">SIP Configuration Hub</h2>
+                <p className="text-xs text-white/40 font-mono uppercase tracking-widest">Manage multiple SIP accounts and verify connection alignment</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-12 gap-8">
+              {/* Profile Selector */}
+              <div className="col-span-4 space-y-6">
+                <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                  <h3 className="text-sm font-black uppercase tracking-widest mb-6 flex items-center gap-2">
+                    <Database className="w-4 h-4 text-emerald-400" /> Saved Profiles
+                  </h3>
+                  <div className="space-y-3">
+                    {sipProfiles.length === 0 ? (
+                      <p className="text-xs text-white/20 italic">No profiles saved yet.</p>
+                    ) : (
+                      sipProfiles.map(profile => (
+                        <div 
+                          key={profile.id}
+                          className={`group flex items-center justify-between p-4 rounded-xl border transition-all cursor-pointer ${
+                            activeProfileId === profile.id 
+                            ? 'bg-emerald-500/10 border-emerald-500/40' 
+                            : 'bg-black/20 border-white/5 hover:border-white/20'
+                          }`}
+                          onClick={() => loadProfile(profile.id)}
+                        >
+                          <div className="flex flex-col">
+                            <span className="text-xs font-bold text-white">{profile.name}</span>
+                            <span className="text-[9px] text-white/40 font-mono">{profile.server}</span>
+                          </div>
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deleteProfile(profile.id);
+                            }}
+                            className="opacity-0 group-hover:opacity-100 p-2 hover:bg-red-500/20 rounded-lg transition-all"
+                          >
+                            <XCircle className="w-3 h-3 text-red-400" />
+                          </button>
+                        </div>
+                      ))
+                    )}
+                      <button 
+                        onClick={() => {
+                          setActiveProfileId(null);
+                          setProfileName('');
+                          setDialerConfig({
+                          ...dialerConfig,
+                          sipServer: '',
+                          sipUser: '',
+                          sipPass: ''
+                        });
+                      }}
+                      className="w-full py-3 border border-dashed border-white/10 rounded-xl text-[10px] font-black uppercase tracking-widest text-white/20 hover:text-white hover:border-white/40 transition-all flex items-center justify-center gap-2"
+                    >
+                      <UserPlus className="w-3 h-3" /> New Profile
+                    </button>
+                  </div>
+                </div>
+
+                <div className="bg-indigo-500/5 rounded-[2rem] border border-indigo-500/10 p-8">
+                  <h3 className="text-[10px] font-black uppercase tracking-widest mb-4 text-indigo-400 flex items-center gap-2">
+                    <ShieldCheck className="w-3 h-3" /> Alignment Checklist
+                  </h3>
+                  <ul className="space-y-3">
+                    <li className="flex items-start gap-3 text-[10px] text-white/60">
+                      <div className="w-1 h-1 rounded-full bg-indigo-500 mt-1.5 shrink-0"></div>
+                      <span><strong>Host:</strong> Ensure your SIP Server matches Vicidial (e.g., <code>trunk.provider.com</code>).</span>
+                    </li>
+                    <li className="flex items-start gap-3 text-[10px] text-white/60">
+                      <div className="w-1 h-1 rounded-full bg-indigo-500 mt-1.5 shrink-0"></div>
+                      <span><strong>Auth:</strong> Use the same <code>user</code> and <code>pass</code> as your Vicidial carrier settings.</span>
+                    </li>
+                    <li className="flex items-start gap-3 text-[10px] text-white/60">
+                      <div className="w-1 h-1 rounded-full bg-indigo-500 mt-1.5 shrink-0"></div>
+                      <span><strong>Firewall:</strong> Ensure your SIP provider allows traffic from this IP.</span>
+                    </li>
+                  </ul>
+                </div>
+
+                {/* Remote Agent Webhook */}
+                <div className="bg-emerald-500/5 rounded-[2rem] border border-emerald-500/10 p-8">
+                  <h3 className="text-[10px] font-black uppercase tracking-widest mb-4 text-emerald-400 flex items-center gap-2">
+                    <Zap className="w-3 h-3" /> Remote Agent Integration
+                  </h3>
+                  <p className="text-[10px] text-white/40 mb-4 leading-relaxed">
+                    If SIP connection fails, use this Webhook in your Vicidial dialplan to trigger Sarah:
+                  </p>
+                  <div className="bg-black/40 p-3 rounded-lg border border-white/10 font-mono text-[9px] text-emerald-300 break-all">
+                    {window.location.origin}/api/inbound/call
+                  </div>
+                  <p className="text-[9px] text-white/20 mt-4 italic">
+                    Sarah will instantly join the call when this endpoint is hit by Vicidial.
+                  </p>
+                </div>
+              </div>
+
+              {/* Configuration Form */}
+              <div className="col-span-8 space-y-6">
+                {/* Whitelisting Info */}
+                <div className="bg-indigo-500/10 rounded-[2rem] border border-indigo-500/20 p-8">
+                  <div className="flex items-center gap-3 mb-4">
+                    <ShieldCheck className="w-5 h-5 text-indigo-400" />
+                    <h3 className="text-sm font-black uppercase tracking-widest text-indigo-400">
+                      Provider Whitelisting Info
+                    </h3>
+                  </div>
+                  <p className="text-[10px] text-white/60 mb-6 leading-relaxed">
+                    If your Vicidial or VoIP provider has a firewall, you <strong>MUST</strong> whitelist Sarah's IP address to allow audio and SIP traffic.
+                  </p>
+                  
+                  <div className="bg-black/40 p-4 rounded-xl border border-white/5 mb-6">
+                    <span className="text-[9px] text-white/20 uppercase font-black block mb-1">Sarah's Outbound IP</span>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-mono font-bold text-indigo-300">{sarahIp}</span>
+                      <button 
+                        onClick={() => navigator.clipboard.writeText(sarahIp)}
+                        className="text-[9px] text-white/40 hover:text-white underline uppercase font-black"
+                      >
+                        Copy IP
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div className="flex items-start gap-3">
+                      <div className="w-1.5 h-1.5 rounded-full bg-indigo-400 mt-1" />
+                      <p className="text-[10px] text-white/40">Tell your provider: "Please whitelist IP <strong>{sarahIp}</strong> for SIP (5060), RTP (10000-20000), and WebSocket (8089) traffic."</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Live Installation Checklist */}
+                <div className="bg-emerald-500/10 rounded-[2rem] border border-emerald-500/20 p-8">
+                  <div className="flex items-center justify-between mb-6">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full bg-emerald-500/20 flex items-center justify-center">
+                        <Activity className="w-5 h-5 text-emerald-400" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-black uppercase tracking-widest text-emerald-400">Live Installation Tracker</h3>
+                        <p className="text-[10px] text-white/40">Step {installStep + 1} of 5</p>
+                      </div>
+                    </div>
+                    <button 
+                      onClick={() => setInstallStep(0)}
+                      className="text-[9px] font-black uppercase tracking-widest text-white/20 hover:text-white underline"
+                    >
+                      Reset Progress
+                    </button>
+                  </div>
+
+                  <div className="space-y-4">
+                    {[
+                      { title: 'OS Installation', desc: 'Running os-install and setting Static IP' },
+                      { title: 'Vicidial Core', desc: 'Running vicibox-install (Express)' },
+                      { title: 'SSL Security', desc: 'Running vicibox-cert for Sarah' },
+                      { title: 'Firewall', desc: 'Opening ports 5060, 8089, 10000-20000' },
+                      { title: 'Sarah Connect', desc: 'Final handshake and test call' }
+                    ].map((step, i) => (
+                      <div key={i} className={`flex items-center gap-4 p-4 rounded-2xl border transition-all ${
+                        installStep > i ? 'bg-emerald-500/10 border-emerald-500/30 opacity-50' :
+                        installStep === i ? 'bg-white/5 border-emerald-500/50 scale-[1.02] shadow-lg shadow-emerald-500/10' :
+                        'bg-black/20 border-white/5 opacity-30'
+                      }`}>
+                        <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-black ${
+                          installStep > i ? 'bg-emerald-500 text-black' :
+                          installStep === i ? 'bg-emerald-400 text-black animate-pulse' :
+                          'bg-white/10 text-white/40'
+                        }`}>
+                          {installStep > i ? '✓' : i + 1}
+                        </div>
+                        <div className="flex-1">
+                          <h4 className="text-[11px] font-black uppercase tracking-widest text-white">{step.title}</h4>
+                          <p className="text-[9px] text-white/40">{step.desc}</p>
+                        </div>
+                        {installStep === i && (
+                          <button 
+                            onClick={() => setInstallStep(i + 1)}
+                            className="px-4 py-1 bg-emerald-500 text-black text-[9px] font-black uppercase tracking-widest rounded-full hover:bg-emerald-400 transition-all"
+                          >
+                            I'm Done
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Build Your Own Dialer Guide */}
+                <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                  <div className="flex items-center gap-3 mb-6">
+                    <Database className="w-5 h-5 text-emerald-400" />
+                    <h3 className="text-sm font-black uppercase tracking-widest text-emerald-400">
+                      Build Your Own Dialer Guide
+                    </h3>
+                  </div>
+                  
+                  <div className="space-y-6">
+                    <div className="p-4 bg-black/40 rounded-xl border border-white/10">
+                      <span className="text-[10px] text-white/40 uppercase font-black block mb-3">1. Install ViciBox 11</span>
+                      <p className="text-[10px] text-white/60 mb-3 leading-relaxed">
+                        Download the ISO from vicibox.com and run these commands on your server:
+                      </p>
+                      <div className="bg-black/60 p-3 rounded font-mono text-[9px] text-emerald-300 space-y-1">
+                        <div># Install OS</div>
+                        <div className="text-white">os-install</div>
+                        <div className="mt-2"># Install Vicidial</div>
+                        <div className="text-white">vicibox-install</div>
+                        <div className="mt-2"># Install SSL (Required)</div>
+                        <div className="text-white">vicibox-cert</div>
+                      </div>
+                    </div>
+
+                    <div className="p-4 bg-black/40 rounded-xl border border-white/10">
+                      <span className="text-[10px] text-white/40 uppercase font-black block mb-3">2. Enable WebRTC Bridge</span>
+                      <p className="text-[10px] text-white/60 mb-3 leading-relaxed">
+                        Edit <code className="text-white">/etc/asterisk/http.conf</code> and set:
+                      </p>
+                      <div className="bg-black/60 p-3 rounded font-mono text-[9px] text-indigo-300">
+                        enabled=yes<br/>
+                        bindport=8088<br/>
+                        tlsenable=yes<br/>
+                        tlsbindaddr=0.0.0.0:8089
+                      </div>
+                    </div>
+
+                    <div className="p-4 bg-black/40 rounded-xl border border-white/10">
+                      <span className="text-[10px] text-white/40 uppercase font-black block mb-3">3. Open Firewall Ports</span>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="bg-black/60 p-2 rounded text-[9px] text-white/60">SIP: 5060</div>
+                        <div className="bg-black/60 p-2 rounded text-[9px] text-white/60">WebRTC: 8089</div>
+                        <div className="bg-black/60 p-2 rounded text-[9px] text-white/60">Audio: 10000-20000</div>
+                        <div className="bg-black/60 p-2 rounded text-[9px] text-white/60">Web: 80/443</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Connection Proof Badge */}
+                <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                  <div className="flex items-center justify-between mb-6">
+                    <h3 className="text-sm font-black uppercase tracking-widest flex items-center gap-2">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400" /> 100% Connection Proof
+                    </h3>
+                    <div className={`px-4 py-1 rounded-full text-[10px] font-black uppercase tracking-widest border ${
+                      webrtcStatus === 'connected' ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400' : 'bg-red-500/10 border-red-500/50 text-red-400'
+                    }`}>
+                      {webrtcStatus === 'connected' ? 'Verified Registered' : 'Not Registered'}
+                    </div>
+                  </div>
+
+                  {webrtcStatus !== 'connected' && (
+                    <div className="mb-6 p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl">
+                      <div className="flex items-center gap-3 mb-2">
+                        <AlertTriangle className="w-4 h-4 text-amber-400" />
+                        <span className="text-[10px] font-black uppercase text-amber-400">Security Warning</span>
+                      </div>
+                      <p className="text-[10px] text-amber-200/60 leading-relaxed">
+                        If your Vicidial uses a self-signed certificate, you <strong>MUST</strong> open this link in a new tab and click "Advanced -&gt; Proceed" for Sarah to connect:
+                      </p>
+                      <a 
+                        href={`https://${dialerConfig.sipServer}:8089/ws`} 
+                        target="_blank" 
+                        rel="noreferrer"
+                        className="inline-block mt-2 text-[10px] text-amber-400 underline font-mono break-all"
+                      >
+                        https://{dialerConfig.sipServer}:8089/ws
+                      </a>
+                    </div>
+                  )}
+                  
+                  <div className="grid grid-cols-2 gap-4 mb-6">
+                    <div className="bg-black/40 p-4 rounded-xl border border-white/5">
+                      <span className="text-[9px] text-white/20 uppercase font-black block mb-1">SIP Registration</span>
+                      <span className={`text-xs font-bold ${webrtcStatus === 'connected' ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {webrtcStatus === 'connected' ? 'ACTIVE (200 OK Received)' : 'INACTIVE'}
+                      </span>
+                    </div>
+                    <div className="bg-black/40 p-4 rounded-xl border border-white/5">
+                      <span className="text-[9px] text-white/20 uppercase font-black block mb-1">Server Response</span>
+                      <span className="text-xs font-bold text-white/60">
+                        {sipTrace.length > 0 ? sipTrace[0].msg : 'Waiting...'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* SIP Traffic Monitor */}
+                  <div className="bg-black/60 rounded-xl p-4 border border-white/5 font-mono text-[9px]">
+                    <div className="flex items-center justify-between mb-2 border-b border-white/10 pb-2">
+                      <span className="text-white/30 uppercase font-black">Live SIP Traffic Monitor</span>
+                      <span className="text-[8px] text-white/10 italic">Real-time packets</span>
+                    </div>
+                    <div className="space-y-1 h-32 overflow-y-auto custom-scrollbar">
+                      {sipTrace.map((trace, i) => (
+                        <div key={i} className="group border-b border-white/5 pb-1">
+                          <div className="flex gap-2 items-center">
+                            <span className="text-white/10 text-[7px]">[{trace.time}]</span>
+                            <span className={trace.direction === 'out' ? 'text-indigo-400' : 'text-emerald-400'}>
+                              {trace.direction === 'out' ? '→ SENT:' : '← RECV:'}
+                            </span>
+                            <span className="text-white/60 font-bold">{trace.msg}</span>
+                          </div>
+                          {trace.raw && (
+                            <div className="hidden group-hover:block mt-1 p-2 bg-black rounded text-[7px] text-white/40 break-all whitespace-pre-wrap border border-white/10">
+                              {trace.raw}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                      {sipTrace.length === 0 && <p className="text-white/5 italic">No SIP traffic detected yet...</p>}
+                    </div>
+                    <p className="text-[7px] text-white/20 mt-2 italic">Hover over a message to see the raw SIP packet headers.</p>
+                  </div>
+                </div>
+
+                {/* Simplified Sarah Connection Section */}
+                <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                  <div className="flex items-center justify-between mb-8">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 bg-emerald-500/10 rounded-xl flex items-center justify-center border border-emerald-500/20">
+                        <Wifi className="w-5 h-5 text-emerald-400" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-black uppercase tracking-widest">Sarah Connection (WebRTC)</h3>
+                        <p className="text-[9px] text-white/40 font-mono">Connect Sarah directly to your Vicidial server</p>
+                      </div>
+                    </div>
+                    <div className="flex gap-4">
+                      <button 
+                        onClick={saveProfile}
+                        className="px-6 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-[10px] font-black uppercase tracking-widest text-white transition-all flex items-center gap-2"
+                      >
+                        <CheckCircle className="w-3 h-3 text-emerald-400" /> Save Settings
+                      </button>
+                      <button 
+                        onClick={onConnectSip}
+                        className={`px-8 py-3 rounded-xl font-black uppercase tracking-widest text-[10px] transition-all flex items-center gap-2 ${
+                          webrtcStatus === 'connected' ? 'bg-emerald-500 text-white shadow-lg shadow-red-500/20' : 
+                          webrtcStatus === 'connecting' ? 'bg-amber-500 text-white animate-pulse' :
+                          'bg-indigo-500 text-white hover:bg-indigo-600 shadow-lg shadow-indigo-500/20'
+                        }`}
+                      >
+                        {webrtcStatus === 'connected' ? <CheckCircle className="w-3 h-3" /> : <Activity className="w-3 h-3" />}
+                        {webrtcStatus === 'connected' ? 'Sarah Online' : 
+                         webrtcStatus === 'connecting' ? 'Connecting...' : 'Connect Sarah'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-8">
+                    <div className="space-y-6">
+                      <div>
+                        <label className="block text-[10px] font-black text-white/40 uppercase tracking-widest mb-2">Profile Name</label>
+                        <input 
+                          type="text" 
+                          value={profileName}
+                          onChange={(e) => setProfileName(e.target.value)}
+                          placeholder="e.g. Production Dialer"
+                          className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs text-white focus:border-emerald-500 transition-all"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black text-white/40 uppercase tracking-widest mb-2">Vicidial IP (Host)</label>
+                        <input 
+                          type="text" 
+                          value={dialerConfig.sipServer}
+                          onChange={(e) => setDialerConfig({...dialerConfig, sipServer: e.target.value})}
+                          placeholder="e.g. 93.127.128.38"
+                          className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs text-white focus:border-emerald-500 transition-all"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black text-white/40 uppercase tracking-widest mb-2 flex justify-between">
+                          <span>Websocket URL</span>
+                          {window.location.protocol === 'https:' && dialerConfig.wsUrl.startsWith('ws://') && (
+                            <span className="text-amber-400 animate-pulse">Mixed Content Warning!</span>
+                          )}
+                        </label>
+                        <div className="relative">
+                          <input 
+                            type="text" 
+                            value={dialerConfig.wsUrl}
+                            onChange={(e) => setDialerConfig({...dialerConfig, wsUrl: e.target.value})}
+                            placeholder="wss://93.127.128.38:8089/ws"
+                            className={`w-full bg-black/40 border ${window.location.protocol === 'https:' && dialerConfig.wsUrl.startsWith('ws://') ? 'border-amber-500/50' : 'border-white/10'} rounded-xl px-4 py-3 text-xs text-white focus:border-emerald-500 transition-all pr-24`}
+                          />
+                          <button 
+                            onClick={() => {
+                              const ip = dialerConfig.sipServer || '93.127.128.38';
+                              const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+                              const port = window.location.protocol === 'https:' ? '8089' : '8088';
+                              setDialerConfig({...dialerConfig, wsUrl: `${protocol}://${ip}:${port}/ws`});
+                            }}
+                            className="absolute right-2 top-2 px-3 py-1.5 bg-white/5 hover:bg-white/10 rounded-lg text-[8px] font-black uppercase tracking-widest text-white/60 hover:text-white transition-all border border-white/10"
+                          >
+                            Auto-Fix
+                          </button>
+                        </div>
+                        {window.location.protocol === 'https:' && dialerConfig.wsUrl.startsWith('ws://') && (
+                          <p className="text-[9px] text-amber-400/60 mt-2 italic">
+                            Browser blocks insecure "ws://" on "https://" pages. Use "wss://" and port 8089.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <div className="space-y-6">
+                      <div>
+                        <label className="block text-[10px] font-black text-white/40 uppercase tracking-widest mb-2">Sarah Extension</label>
+                        <input 
+                          type="text" 
+                          value={dialerConfig.webrtcUser}
+                          onChange={(e) => setDialerConfig({...dialerConfig, webrtcUser: e.target.value})}
+                          placeholder="e.g. 78602"
+                          className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs text-white focus:border-emerald-500 transition-all"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black text-white/40 uppercase tracking-widest mb-2">Extension Password</label>
+                        <input 
+                          type="password" 
+                          value={dialerConfig.webrtcPass}
+                          onChange={(e) => setDialerConfig({...dialerConfig, webrtcPass: e.target.value})}
+                          className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs text-white focus:border-emerald-500 transition-all"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Troubleshooting Section */}
+                  <div className="bg-amber-500/5 rounded-[2rem] border border-amber-500/20 p-8 mt-8">
+                    <h3 className="text-sm font-black uppercase tracking-widest flex items-center gap-2 text-amber-400 mb-4">
+                      <ShieldAlert className="w-4 h-4" /> Stuck on "Connecting"?
+                    </h3>
+                    <div className="grid grid-cols-2 gap-8 text-[10px] text-white/40 leading-relaxed">
+                      <div className="space-y-2">
+                        <p className="font-black text-white/60 uppercase">1. Mixed Content (HTTPS)</p>
+                        <p>This app runs on <span className="text-white">HTTPS</span>. Browsers block insecure <span className="text-white">ws://</span> connections. Use <span className="text-amber-400 font-bold">wss://</span> and port <span className="text-white">8089</span>.</p>
+                      </div>
+                      <div className="space-y-2">
+                        <p className="font-black text-white/60 uppercase">2. Firewall (Port 8089)</p>
+                        <p>Ensure your Vicidial server allows inbound traffic on port <span className="text-white">8089</span> (TCP). Check with <span className="text-indigo-400">netstat -anp | grep 8089</span>.</p>
+                      </div>
+                      <div className="space-y-2">
+                        <p className="font-black text-white/60 uppercase">3. Asterisk HTTP Config</p>
+                        <p>In <span className="text-white">http.conf</span>, ensure <span className="text-white">enabled=yes</span>, <span className="text-white">bindaddr=0.0.0.0</span>, and <span className="text-white">tlsenable=yes</span>.</p>
+                      </div>
+                      <div className="space-y-2">
+                        <p className="font-black text-white/60 uppercase">4. Self-Signed Certs</p>
+                        <p>If using self-signed certs, open <span className="text-indigo-400 underline">https://{dialerConfig.sipServer}:8089/ws</span> in a new tab and "Accept Risk" to allow the browser to connect.</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Vicidial Template Guide */}
+                  <div className="bg-indigo-500/5 rounded-[2rem] border border-indigo-500/20 p-8 mt-8">
+                    <h3 className="text-sm font-black uppercase tracking-widest flex items-center gap-2 text-indigo-400 mb-6">
+                      <Database className="w-4 h-4" /> Vicidial "WEBRTC" Template Setup
+                    </h3>
+                    <p className="text-[10px] text-white/40 mb-6 leading-relaxed">
+                      Sarah uses WebRTC to talk. Vicidial's default "SIP_generic" template does not support WebRTC. 
+                      You <span className="text-white font-bold">MUST</span> create a new template in Vicidial Admin.
+                    </p>
+                    
+                    <div className="space-y-6">
+                      <div>
+                        <p className="text-[10px] font-black text-white/60 uppercase mb-2">Step 1: Create Template</p>
+                        <p className="text-[10px] text-white/40 mb-3">Go to <span className="text-white">Admin &gt; Templates &gt; Add New Template</span></p>
+                        <div className="bg-black/60 p-4 rounded-xl border border-white/5 font-mono text-[9px] text-indigo-300 space-y-1">
+                          <p>Template ID: <span className="text-white">WEBRTC</span></p>
+                          <p>Template Name: <span className="text-white">WebRTC Phone Template</span></p>
+                          <div className="mt-3 pt-3 border-t border-white/5">
+                            <p className="text-white/40 mb-2 uppercase text-[8px]">Template Contents:</p>
+                            <p>type=friend</p>
+                            <p>host=dynamic</p>
+                            <p>context=default</p>
+                            <p>encryption=yes</p>
+                            <p>avpf=yes</p>
+                            <p>icesupport=yes</p>
+                            <p>directmedia=no</p>
+                            <p>transport=wss,ws,udp</p>
+                            <p>force_avp=yes</p>
+                            <p>dtlsenable=yes</p>
+                            <p>dtlsverify=fingerprint</p>
+                            <p>dtlssetup=actpass</p>
+                            <p>dtlscertfile=/etc/asterisk/keys/asterisk.pem</p>
+                            <p>rtcp_mux=yes</p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div>
+                        <p className="text-[10px] font-black text-white/60 uppercase mb-2">Step 2: Apply to Phone</p>
+                        <p className="text-[10px] text-white/40">Go to <span className="text-white">Admin &gt; Phones &gt; 78602</span>. Set <span className="text-white">Template ID</span> to <span className="text-indigo-400 font-bold">WEBRTC</span> and save.</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* WebRTC Debug Logs */}
+                  <div className="mt-8 bg-black/40 rounded-xl border border-white/5 p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <span className="text-[9px] font-black text-white/30 uppercase tracking-widest">Connection Debug Console</span>
+                      <button 
+                        onClick={() => setWebrtcLogs([])}
+                        className="text-[8px] text-white/20 hover:text-white uppercase font-bold"
+                      >
+                        Clear Logs
+                      </button>
+                    </div>
+                    <div className="space-y-1 max-h-32 overflow-y-auto custom-scrollbar">
+                      {webrtcLogs.length === 0 ? (
+                        <p className="text-[10px] text-white/10 italic">Waiting for connection attempt...</p>
+                      ) : (
+                        webrtcLogs.map((log, i) => (
+                          <div key={i} className="flex gap-2 text-[10px] font-mono">
+                            <span className="text-white/20">[{new Date().toLocaleTimeString()}]</span>
+                            <span className={log.includes('Error') ? 'text-red-400' : log.includes('Success') ? 'text-emerald-400' : 'text-white/60'}>
+                              {log}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Remote Agent Webhook (Moved here for clarity) */}
+                <div className="bg-emerald-500/5 rounded-[2rem] border border-emerald-500/10 p-8">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-[10px] font-black uppercase tracking-widest text-emerald-400 flex items-center gap-2">
+                      <Zap className="w-3 h-3" /> Dialplan Instructions
+                    </h3>
+                    <div className="flex gap-2">
+                      <input 
+                        type="text"
+                        value={testExtension}
+                        onChange={(e) => setTestExtension(e.target.value)}
+                        placeholder="Agent Ext (e.g. 78601)"
+                        className="bg-black/40 border border-white/10 rounded-lg px-3 py-1 text-[9px] text-white w-32"
+                      />
+                      <button 
+                        onClick={() => onMakeTestCall()}
+                        disabled={webrtcStatus !== 'connected' || isTestCalling}
+                        className="px-3 py-1 bg-indigo-500 hover:bg-indigo-600 text-white rounded-lg text-[9px] font-black uppercase tracking-widest transition-all disabled:opacity-50"
+                      >
+                        {isTestCalling ? 'Calling...' : 'Test Sarah'}
+                      </button>
+                      <button 
+                        onClick={() => onMakeTestCall('8500')}
+                        disabled={webrtcStatus !== 'connected' || isTestCalling}
+                        className="px-3 py-1 bg-emerald-500/20 hover:bg-emerald-500/40 text-emerald-400 border border-emerald-500/30 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all disabled:opacity-50"
+                        title="Dials Asterisk Echo Test (8500)"
+                      >
+                        Echo Test
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <div className="space-y-4">
+                    <div className="p-4 bg-black/40 rounded-xl border border-white/10">
+                      <span className="text-[9px] text-white/40 uppercase font-black block mb-2">Step 1: Add to Carrier Dialplan Entry</span>
+                      <div className="bg-black/60 p-3 rounded font-mono text-[9px] text-emerald-300">
+                        ; Sarah AI Bridge<br/>
+                        exten =&gt; 9999,1,NoOp(Sarah Bridge)<br/>
+                        exten =&gt; 9999,n,Dial(SIP/{dialerConfig.webrtcUser || '78602'},30,tTo)<br/>
+                        exten =&gt; 9999,n,Hangup()
+                      </div>
+                    </div>
+
+                    <div className="p-4 bg-black/40 rounded-xl border border-white/10">
+                      <span className="text-[9px] text-white/40 uppercase font-black block mb-2">Step 2: Debugging (The "Real Work")</span>
+                      <p className="text-[10px] text-white/60 mb-3">
+                        Run this command in your Linux terminal to see why the call is hanging up:
+                      </p>
+                      <div className="bg-black/60 p-3 rounded font-mono text-[9px] text-indigo-300">
+                        asterisk -rvvv | grep 9999
+                      </div>
+                      <p className="text-[9px] text-white/20 mt-3 italic">
+                        If you see "Extension 9999 not found", your Dialplan Entry is not being saved correctly in Vicidial.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Real-time Debug Console */}
+                <div className="bg-black/40 rounded-[2rem] border border-white/10 p-8">
+                  <div className="flex items-center justify-between mb-6">
+                    <h3 className="text-sm font-black uppercase tracking-widest flex items-center gap-2">
+                      <Activity className="w-4 h-4 text-indigo-400" /> Connection Debug Console
+                    </h3>
+                    <button 
+                      onClick={onClearSipLogs}
+                      className="text-[9px] font-black uppercase tracking-widest text-white/20 hover:text-white transition-colors"
+                    >
+                      Clear Logs
+                    </button>
+                  </div>
+                  <div className="bg-black/60 rounded-xl p-6 h-64 overflow-y-auto font-mono text-[11px] space-y-3 custom-scrollbar border border-white/5">
+                    {sipLogs.some(l => l.msg.includes('Conflict')) && (
+                      <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-4 mb-4 flex items-center gap-4 animate-pulse">
+                        <AlertTriangle className="w-6 h-6 text-red-400 shrink-0" />
+                        <div>
+                          <p className="text-red-400 font-bold uppercase tracking-widest text-[10px]">Registration Conflict Detected</p>
+                          <p className="text-white/60 text-[10px]">Extension {dialerConfig.webrtcUser} is likely logged in on another device. Sarah and the other device are kicking each other out.</p>
+                        </div>
+                      </div>
+                    )}
+                    {sipLogs.length === 0 ? (
+                      <div className="h-full flex flex-col items-center justify-center text-white/20 space-y-4">
+                        <Activity className="w-8 h-8 opacity-10" />
+                        <p className="italic">Ready to test connection. Logs will appear here.</p>
+                      </div>
+                    ) : (
+                      sipLogs.map((log, i) => (
+                        <div key={i} className="flex gap-4 border-b border-white/5 pb-2">
+                          <span className="text-white/20 shrink-0">{log.time}</span>
+                          <span className={
+                            log.type === 'error' ? 'text-red-400' :
+                            log.type === 'success' ? 'text-emerald-400' :
+                            'text-indigo-300'
+                          }>{log.msg}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : view === 'costs' ? (
           <div className="flex-1 p-8 overflow-y-auto custom-scrollbar flex flex-col">
             <div className="flex items-center gap-6 mb-8">
               <div className="w-16 h-16 bg-emerald-500/10 rounded-2xl flex items-center justify-center border border-emerald-500/20">
@@ -308,6 +1126,516 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                     </div>
                   </div>
                 ))}
+              </div>
+            </div>
+          </div>
+        ) : view === 'vicidial' ? (
+          <div className="flex-1 p-8 overflow-y-auto custom-scrollbar flex flex-col">
+            <div className="flex items-center gap-6 mb-8">
+              <div className="w-16 h-16 bg-emerald-500/10 rounded-2xl flex items-center justify-center border border-emerald-500/20">
+                <Link2 className="w-8 h-8 text-emerald-400" />
+              </div>
+              <div>
+                <h2 className="text-3xl font-black uppercase tracking-tighter">Vicidial Link (Sarah)</h2>
+                <p className="text-xs text-white/40 font-mono uppercase tracking-widest">Sarah is ready to bridge into your Vicidial Cluster</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-sm font-black uppercase tracking-widest flex items-center gap-2">
+                    <Settings className="w-4 h-4 text-indigo-400" /> Connection Settings
+                  </h3>
+                  <button 
+                    onClick={() => {
+                      if (confirm('This will clear all saved profiles and reset Sarah to factory defaults. Continue?')) {
+                        localStorage.removeItem('sip_profiles');
+                        localStorage.removeItem('dialer_config');
+                        const defaults = {
+                          sipServer: '93.127.128.38',
+                          sipPort: '5060',
+                          sipUser: '78602',
+                          sipPass: 'test',
+                          wsUrl: 'wss://93.127.128.38:8089/ws',
+                          webrtcUser: '78602',
+                          webrtcPass: 'test',
+                          status: 'idle'
+                        };
+                        setDialerConfig(defaults);
+                        syncDialerConfig(defaults);
+                        setSipProfiles([]);
+                        setActiveProfileId(null);
+                        onConnectSip(); // Trigger reconnect
+                      }
+                    }}
+                    className="text-[8px] font-black uppercase tracking-widest text-red-500/40 hover:text-red-500 transition-all"
+                  >
+                    Hard Reset Sarah
+                  </button>
+                </div>
+                <div className="space-y-6">
+                  {sipProfiles.length > 0 && (
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      {sipProfiles.map(p => (
+                        <button
+                          key={p.id}
+                          onClick={() => loadProfile(p.id)}
+                          className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all ${
+                            activeProfileId === p.id 
+                              ? 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20' 
+                              : 'bg-white/5 text-white/40 hover:bg-white/10'
+                          }`}
+                        >
+                          {p.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div>
+                    <label className="text-[9px] text-white/20 uppercase font-black block mb-2">Profile Name</label>
+                    <input 
+                      type="text" 
+                      value={profileName}
+                      onChange={(e) => setProfileName(e.target.value)}
+                      placeholder="e.g. Sarah Main Dialer"
+                      className="w-full bg-black/40 border border-white/5 rounded-xl px-4 py-3 text-xs font-mono text-white outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-[9px] text-white/20 uppercase font-black block mb-2">Vicidial IP</label>
+                      <input 
+                        type="text" 
+                        value={dialerConfig.sipServer}
+                        onChange={(e) => setDialerConfig({...dialerConfig, sipServer: e.target.value})}
+                        className="w-full bg-black/40 border border-white/5 rounded-xl px-4 py-3 text-xs font-mono text-white outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[9px] text-white/20 uppercase font-black block mb-2">WebRTC Port</label>
+                      <input 
+                        type="text" 
+                        value={dialerConfig.sipPort}
+                        onChange={(e) => setDialerConfig({...dialerConfig, sipPort: e.target.value})}
+                        className="w-full bg-black/40 border border-white/5 rounded-xl px-4 py-3 text-xs font-mono text-white outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-[9px] text-white/20 uppercase font-black block mb-2">WebSocket URL</label>
+                    <div className="relative">
+                      <input 
+                        type="text" 
+                        value={dialerConfig.wsUrl}
+                        onChange={(e) => setDialerConfig({...dialerConfig, wsUrl: e.target.value})}
+                        className="w-full bg-black/40 border border-white/5 rounded-xl px-4 py-3 text-xs font-mono text-white outline-none focus:border-indigo-500"
+                      />
+                      {window.location.protocol === 'https:' && dialerConfig.wsUrl?.startsWith('ws://') && (
+                        <button 
+                          onClick={() => setDialerConfig({...dialerConfig, wsUrl: dialerConfig.wsUrl.replace('ws://', 'wss://')})}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 bg-red-500 hover:bg-red-600 text-white text-[8px] font-black uppercase px-2 py-1 rounded shadow-lg animate-pulse"
+                        >
+                          Auto-Fix SSL
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-[9px] text-white/20 uppercase font-black block mb-2">Extension</label>
+                      <input 
+                        type="text" 
+                        value={dialerConfig.webrtcUser}
+                        onChange={(e) => setDialerConfig({...dialerConfig, webrtcUser: e.target.value})}
+                        className="w-full bg-black/40 border border-white/5 rounded-xl px-4 py-3 text-xs font-mono text-white outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[9px] text-white/20 uppercase font-black block mb-2">Password</label>
+                      <input 
+                        type="password" 
+                        value={dialerConfig.webrtcPass}
+                        onChange={(e) => setDialerConfig({...dialerConfig, webrtcPass: e.target.value})}
+                        className="w-full bg-black/40 border border-white/5 rounded-xl px-4 py-3 text-xs font-mono text-white outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex gap-4">
+                    <button 
+                      onClick={() => {
+                        setActiveProfileId(null);
+                        setProfileName('');
+                        setDialerConfig({
+                          ...dialerConfig,
+                          sipServer: '',
+                          sipUser: '',
+                          sipPass: '',
+                          wsUrl: '',
+                          webrtcUser: '',
+                          webrtcPass: ''
+                        });
+                      }}
+                      className="px-6 py-4 bg-white/5 hover:bg-white/10 border border-white/10 text-white/40 hover:text-white rounded-xl font-black uppercase tracking-widest text-[10px] transition-all flex items-center justify-center gap-2"
+                    >
+                      <UserPlus className="w-4 h-4" /> New
+                    </button>
+                    <button 
+                      onClick={saveProfile}
+                      className="flex-1 py-4 bg-white/5 hover:bg-white/10 border border-white/10 text-white rounded-xl font-black uppercase tracking-widest text-[10px] transition-all flex items-center justify-center gap-2"
+                    >
+                      <CheckCircle className="w-4 h-4 text-emerald-400" /> Save Profile
+                    </button>
+                    <button 
+                      onClick={() => syncDialerConfig(dialerConfig)}
+                      className="flex-1 py-4 bg-indigo-500 hover:bg-indigo-600 text-white rounded-xl font-black uppercase tracking-widest text-[10px] shadow-lg transition-all flex items-center justify-center gap-2"
+                    >
+                      <Zap className="w-4 h-4" /> Sync to Sarah
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-6">
+                <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-sm font-black uppercase tracking-widest flex items-center gap-2">
+                      <Activity className="w-4 h-4 text-indigo-400" /> Connection Status & Logs
+                    </h3>
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={async () => {
+                          const host = dialerConfig.sipServer || '93.127.128.38';
+                          const port = dialerConfig.sipPort || '8089';
+                          setSipLogs(prev => [{ type: 'info', msg: `Checking reachability of ${host}:${port}...`, time: new Date().toLocaleTimeString() }, ...prev]);
+                          try {
+                            const res = await fetch(`/api/health/vicidial?host=${host}&port=${port}`);
+                            const data = await res.json();
+                            if (data.reachable) {
+                              setSipLogs(prev => [{ type: 'success', msg: `SUCCESS: Server ${host} is reachable on port ${port}!`, time: new Date().toLocaleTimeString() }, ...prev]);
+                            } else {
+                              setSipLogs(prev => [{ type: 'error', msg: `ERROR: Server ${host} is NOT reachable on port ${port}. Check firewall!`, time: new Date().toLocaleTimeString() }, ...prev]);
+                            }
+                          } catch (err) {
+                            setSipLogs(prev => [{ type: 'error', msg: `Check failed: Network error.`, time: new Date().toLocaleTimeString() }, ...prev]);
+                          }
+                        }}
+                        className="text-[8px] font-black uppercase tracking-widest text-indigo-400 hover:text-indigo-300 transition-all border border-indigo-500/20 px-2 py-1 rounded"
+                      >
+                        Ping Server
+                      </button>
+                      <button 
+                        onClick={onClearSipLogs}
+                        className="text-[8px] font-black uppercase tracking-widest text-white/20 hover:text-white transition-all"
+                      >
+                        Clear Logs
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <div className="p-6 bg-black/40 rounded-2xl border border-white/5 font-mono text-[11px] space-y-4 mb-6">
+                    <div className="flex justify-between items-center">
+                      <span className="text-white/20 uppercase font-black text-[9px]">WebRTC Bridge</span>
+                      <span className={`px-3 py-1 rounded-full text-[9px] font-black uppercase ${
+                        webrtcStatus === 'connected' ? 'bg-emerald-500/20 text-emerald-400' : 
+                        webrtcStatus === 'connecting' ? 'bg-amber-500/20 text-amber-400 animate-pulse' :
+                        'bg-red-500/20 text-red-400'
+                      }`}>
+                        {webrtcStatus}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-white/20 uppercase font-black text-[9px]">Sarah Identity</span>
+                      <span className="text-white font-bold">{agentName}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-white/20 uppercase font-black text-[9px]">SIP Server</span>
+                      <span className="text-white/60">{dialerConfig.sipServer || 'Not Set'}</span>
+                    </div>
+                    
+                    <div className="pt-4 border-t border-white/5">
+                      <button 
+                        onClick={onConnectSip}
+                        className="w-full py-3 bg-indigo-500 hover:bg-indigo-600 rounded-xl text-[9px] font-black uppercase tracking-widest text-white transition-all shadow-lg shadow-indigo-500/20"
+                      >
+                        {webrtcStatus === 'connecting' ? 'Connecting...' : 'Connect Sarah Bridge'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="bg-black/60 rounded-xl p-4 h-48 overflow-y-auto font-mono text-[10px] space-y-2 custom-scrollbar border border-white/5">
+                    {sipLogs.some(l => l.msg.includes('Conflict')) && (
+                      <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-2 mb-2 flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                        <p className="text-red-400 font-bold uppercase tracking-widest text-[8px]">Conflict Detected</p>
+                      </div>
+                    )}
+                    {sipLogs.length === 0 ? (
+                      <div className="h-full flex flex-col items-center justify-center text-white/10">
+                        <p className="italic">No connection logs yet.</p>
+                      </div>
+                    ) : (
+                      sipLogs.map((log, i) => (
+                        <div key={i} className="flex gap-3 border-b border-white/5 pb-1">
+                          <span className="text-white/10 shrink-0">{log.time}</span>
+                          <span className={
+                            log.type === 'error' ? 'text-red-400' :
+                            log.type === 'success' ? 'text-emerald-400' :
+                            'text-indigo-300'
+                          }>{log.msg}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-red-500/5 rounded-[2rem] border border-red-500/20 p-8">
+                  <div className="flex items-center gap-4 mb-6">
+                    <ShieldAlert className="w-5 h-5 text-red-400" />
+                    <h3 className="text-sm font-black uppercase tracking-widest text-red-400">Firewall Whitelist</h3>
+                  </div>
+                  <p className="text-[10px] text-white/40 mb-4 leading-relaxed">
+                    Vicidial servers often have strict firewalls (Fail2Ban/WhiteList). You **MUST** whitelist Sarah's outbound IP to allow her to connect:
+                  </p>
+                  <div className="bg-black/60 p-4 rounded-xl border border-white/10 font-mono text-center mb-4">
+                    <span className="text-xl font-black text-white tracking-tighter">{outboundIp}</span>
+                    <p className="text-[8px] text-white/20 uppercase mt-1">Sarah's Outbound IP</p>
+                  </div>
+                  <div className="bg-black/40 p-4 rounded-xl border border-white/5">
+                    <p className="text-[9px] text-white/40 uppercase font-black mb-2">Whitelist Command (SSH):</p>
+                    <code className="text-[10px] text-emerald-400 font-mono break-all">
+                      /usr/local/bin/vicidial_ip_list_add.sh --ip={outboundIp}
+                    </code>
+                  </div>
+                </div>
+
+                <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                  <div className="flex items-center gap-4 mb-6">
+                    <Link2 className="w-5 h-5 text-indigo-400" />
+                    <h3 className="text-sm font-black uppercase tracking-widest">Required Ports Checklist</h3>
+                  </div>
+                  <div className="overflow-hidden rounded-xl border border-white/5">
+                    <table className="w-full text-left text-[10px] font-mono">
+                      <thead className="bg-white/5 text-white/40 uppercase font-black">
+                        <tr>
+                          <th className="px-4 py-2">Port</th>
+                          <th className="px-4 py-2">Service</th>
+                          <th className="px-4 py-2">Requirement</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-white/5">
+                        <tr>
+                          <td className="px-4 py-2 text-white">80 / 443</td>
+                          <td className="px-4 py-2 text-white/60">HTTP/S</td>
+                          <td className="px-4 py-2 text-emerald-400">MANDATORY</td>
+                        </tr>
+                        <tr>
+                          <td className="px-4 py-2 text-white">5060</td>
+                          <td className="px-4 py-2 text-white/60">SIP</td>
+                          <td className="px-4 py-2 text-emerald-400">MANDATORY</td>
+                        </tr>
+                        <tr>
+                          <td className="px-4 py-2 text-white">8089</td>
+                          <td className="px-4 py-2 text-white/60">WSS</td>
+                          <td className="px-4 py-2 text-emerald-400">CRITICAL (WebRTC)</td>
+                        </tr>
+                        <tr>
+                          <td className="px-4 py-2 text-white">10000-20000</td>
+                          <td className="px-4 py-2 text-white/60">RTP (UDP)</td>
+                          <td className="px-4 py-2 text-amber-400">AUDIO FLOW</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p className="mt-4 text-[9px] text-white/20 italic">
+                    Note: If 8089 is closed, Sarah will never connect. If 10000-20000 is closed, Sarah will connect but you will hear NO audio.
+                  </p>
+                </div>
+
+                <div className="bg-indigo-500/5 rounded-[2rem] border border-indigo-500/20 p-8">
+                  <div className="flex items-center gap-4 mb-6">
+                    <Globe className="w-5 h-5 text-indigo-400" />
+                    <h3 className="text-sm font-black uppercase tracking-widest text-indigo-400">New Vicidial Install?</h3>
+                  </div>
+                  <div className="space-y-4">
+                    <p className="text-[10px] text-white/40 leading-relaxed">
+                      If you just reinstalled Vicidial, follow these steps to link Sarah to extension <span className="text-white font-bold">78602</span>:
+                    </p>
+                    <div className="bg-black/40 p-5 rounded-2xl border border-white/5 space-y-4">
+                      <div className="flex gap-4">
+                        <div className="w-6 h-6 rounded-full bg-indigo-500/20 flex items-center justify-center text-[10px] font-black text-indigo-400 shrink-0">1</div>
+                        <div>
+                          <p className="text-[10px] text-white font-bold uppercase tracking-wider mb-1">Vicidial Admin Panel</p>
+                          <p className="text-[9px] text-white/40">Go to <span className="text-white">Admin {"->"} Phones {"->"} 78602</span> and set:</p>
+                          <ul className="text-[9px] text-indigo-400/80 mt-2 space-y-1 list-disc pl-3">
+                            <li>Set as WebRTC: <span className="text-indigo-400 font-bold">Y</span></li>
+                            <li>Registration Password: <span className="text-indigo-400 font-bold">test</span></li>
+                            <li>WebRTC Server IP: <span className="text-indigo-400 font-bold">{dialerConfig.sipServer}</span></li>
+                          </ul>
+                        </div>
+                      </div>
+                      <div className="flex gap-4">
+                        <div className="w-6 h-6 rounded-full bg-indigo-500/20 flex items-center justify-center text-[10px] font-black text-indigo-400 shrink-0">2</div>
+                        <div>
+                          <p className="text-[10px] text-white font-bold uppercase tracking-wider mb-1">Sarah Dashboard</p>
+                          <p className="text-[9px] text-white/40">Click the red <span className="text-red-400 font-bold">Hard Reset Sarah</span> button above to sync these defaults.</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-4">
+                        <div className="w-6 h-6 rounded-full bg-indigo-500/20 flex items-center justify-center text-[10px] font-black text-indigo-400 shrink-0">3</div>
+                        <div>
+                          <p className="text-[10px] text-white font-bold uppercase tracking-wider mb-1">Connect Bridge</p>
+                          <p className="text-[9px] text-white/40">Click <span className="text-indigo-400 font-bold">Connect Sarah Bridge</span>. You should see "SIP Registered (200 OK)" in the logs.</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-amber-500/5 rounded-[2rem] border border-amber-500/20 p-8">
+                  <div className="flex items-center gap-4 mb-6">
+                    <Users className="w-5 h-5 text-amber-400" />
+                    <h3 className="text-sm font-black uppercase tracking-widest text-amber-400">Vicidial Agent Login Help</h3>
+                  </div>
+                  <div className="space-y-4">
+                    <div className="bg-black/40 p-4 rounded-xl border border-white/5">
+                      <p className="text-[10px] text-white/40 uppercase font-black mb-2">Step 1: Phone Login</p>
+                      <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                        <span className="text-white/20">Phone Login:</span>
+                        <span className="text-white font-bold">{dialerConfig.webrtcUser || '78602'}</span>
+                        <span className="text-white/20">Phone Pass:</span>
+                        <span className="text-white font-bold">{dialerConfig.webrtcPass || 'test'}</span>
+                      </div>
+                    </div>
+                    <div className="bg-black/40 p-4 rounded-xl border border-white/5">
+                      <p className="text-[10px] text-white/40 uppercase font-black mb-2">Step 2: User Login</p>
+                      <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                        <span className="text-white/20">User ID:</span>
+                        <span className="text-white font-bold">6666 (or your ID)</span>
+                        <span className="text-white/20">User Pass:</span>
+                        <span className="text-white font-bold">1234 (or your Pass)</span>
+                      </div>
+                    </div>
+                    <div className="p-4 bg-red-500/10 rounded-xl border border-red-500/20">
+                      <h4 className="text-[9px] font-black uppercase text-red-400 mb-1 flex items-center gap-2">
+                        <AlertTriangle className="w-3 h-3" /> Login Failed?
+                      </h4>
+                      <ul className="text-[9px] text-red-400/60 space-y-2 list-disc pl-3">
+                        <li className="font-bold">CRITICAL: You CANNOT use extension <span className="text-white">{dialerConfig.webrtcUser}</span> for your own softphone if Sarah is connected. Only one device per extension!</li>
+                        <li>Ensure "Set as WebRTC" is <span className="text-red-400 font-bold">Y</span> in Vicidial Phone settings.</li>
+                        <li>Ensure "Protocol" is <span className="text-red-400 font-bold">SIP</span>.</li>
+                        <li>Check if extension <span className="text-red-400 font-bold">{dialerConfig.webrtcUser}</span> exists in Vicidial.</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-emerald-500/5 rounded-[2rem] border border-emerald-500/20 p-8">
+                  <div className="flex items-center justify-between mb-6">
+                    <div className="flex items-center gap-4">
+                      <ShieldCheck className="w-5 h-5 text-emerald-400" />
+                      <h3 className="text-sm font-black uppercase tracking-widest text-emerald-400">Master Diagnostic</h3>
+                    </div>
+                    <button 
+                      onClick={async () => {
+                        const host = dialerConfig.sipServer || '93.127.128.38';
+                        const ports = "80,443,5060,8089";
+                        setSipLogs?.(prev => [{ type: 'info', msg: `Running Full Network Scan on ${host}...`, time: new Date().toLocaleTimeString() }, ...prev]);
+                        try {
+                          const res = await fetch(`/api/health/vicidial?host=${host}&ports=${ports}`);
+                          const data = await res.json();
+                          data.results.forEach((r: any) => {
+                            const status = r.reachable ? 'OPEN' : 'CLOSED';
+                            const type = r.reachable ? 'success' : 'error';
+                            setSipLogs?.(prev => [{ type, msg: `Port ${r.port}: ${status}`, time: new Date().toLocaleTimeString() }, ...prev]);
+                          });
+                        } catch (err) {
+                          setSipLogs?.(prev => [{ type: 'error', msg: `Scan failed.`, time: new Date().toLocaleTimeString() }, ...prev]);
+                        }
+                      }}
+                      className="px-4 py-2 bg-emerald-500/20 hover:bg-emerald-500/40 border border-emerald-500/20 text-emerald-400 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all"
+                    >
+                      Run Full Network Scan
+                    </button>
+                  </div>
+
+                  <div className="space-y-6">
+                    <div>
+                      <p className="text-[10px] text-white/40 mb-4 leading-relaxed">
+                        1. **Firewall & Services Check**: Run this on your Vicidial SSH to check if services are actually listening:
+                      </p>
+                      <div className="bg-black/60 p-4 rounded-xl border border-white/10 font-mono text-[10px] relative group">
+                        <code className="text-emerald-400 break-all">
+                          netstat -tunlp | grep -E '8089|5060|443' && asterisk -rx "http show status" && asterisk -rx "sip show settings" | grep -i "tls"
+                        </code>
+                        <button 
+                          onClick={() => {
+                            navigator.clipboard.writeText(`netstat -tunlp | grep -E '8089|5060|443' && asterisk -rx "http show status" && asterisk -rx "sip show settings" | grep -i "tls"`);
+                            alert('Command copied!');
+                          }}
+                          className="absolute right-2 top-2 p-2 bg-white/5 hover:bg-white/10 rounded-lg opacity-0 group-hover:opacity-100 transition-all"
+                        >
+                          <Database className="w-3 h-3 text-white/40" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <p className="text-[10px] text-white/40 mb-4 leading-relaxed">
+                        2. **Database Integrity**: Verify extension <span className="text-white font-bold">{dialerConfig.webrtcUser}</span> is WebRTC ready:
+                      </p>
+                      <div className="bg-black/60 p-4 rounded-xl border border-white/10 font-mono text-[10px] relative group">
+                        <code className="text-emerald-400 break-all">
+                          mysql -u cron -p1234 -e "SELECT extension,status,protocol,is_webrtc,webphone_auto_answer FROM vicidial_phones WHERE extension='{dialerConfig.webrtcUser || '78602'}';" asterisk
+                        </code>
+                        <button 
+                          onClick={() => {
+                            navigator.clipboard.writeText(`mysql -u cron -p1234 -e "SELECT extension,status,protocol,is_webrtc,webphone_auto_answer FROM vicidial_phones WHERE extension='${dialerConfig.webrtcUser || '78602'}';" asterisk`);
+                            alert('Command copied!');
+                          }}
+                          className="absolute right-2 top-2 p-2 bg-white/5 hover:bg-white/10 rounded-lg opacity-0 group-hover:opacity-100 transition-all"
+                        >
+                          <Database className="w-3 h-3 text-white/40" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="p-4 bg-white/5 rounded-xl border border-white/5">
+                      <h4 className="text-[9px] font-black uppercase text-white/40 mb-2">Must-Have Values:</h4>
+                      <div className="grid grid-cols-2 gap-4">
+                        <ul className="text-[9px] text-white/20 space-y-1 list-disc pl-3 font-mono">
+                          <li>is_webrtc: <span className="text-emerald-400 font-bold">Y</span></li>
+                          <li>protocol: <span className="text-emerald-400 font-bold">SIP</span></li>
+                        </ul>
+                        <ul className="text-[9px] text-white/20 space-y-1 list-disc pl-3 font-mono">
+                          <li>auto_answer: <span className="text-emerald-400 font-bold">Y</span></li>
+                          <li>status: <span className="text-emerald-400 font-bold">ACTIVE</span></li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-indigo-500/10 rounded-[2rem] border border-indigo-500/20 p-8">
+                  <div className="flex items-center gap-4 mb-4">
+                    <Volume2 className="w-5 h-5 text-indigo-400" />
+                    <h3 className="text-sm font-black uppercase tracking-widest">Sarah Voice Test</h3>
+                  </div>
+                  <p className="text-[11px] text-white/40 leading-relaxed mb-6">
+                    Verify Sarah's voice locally before bridging. This confirms her AI brain is active and ready to speak.
+                  </p>
+                  <div className="flex gap-4">
+                    <button 
+                      onClick={() => onMakeTestCall(dialerConfig.webrtcUser)}
+                      className="flex-1 py-4 bg-indigo-500 hover:bg-indigo-600 text-white rounded-xl font-black uppercase tracking-widest text-[10px] shadow-lg shadow-indigo-500/20 transition-all flex items-center justify-center gap-2"
+                    >
+                      <Play className="w-4 h-4" /> Test Sarah's Voice Now
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -658,6 +1986,48 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                         className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs text-white focus:border-indigo-500 transition-all"
                       />
                     </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      <button 
+                        onClick={() => syncDialerConfig(dialerConfig)}
+                        disabled={saveStatus === 'saving'}
+                        className={`font-black uppercase tracking-widest text-[10px] py-3 rounded-xl transition-all border border-white/10 ${
+                          saveStatus === 'saving' ? 'bg-white/5 text-white/20' :
+                          saveStatus === 'success' ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/20' :
+                          'bg-white/5 hover:bg-white/10 text-white/60 hover:text-white'
+                        }`}
+                      >
+                        {saveStatus === 'saving' ? 'Saving...' : 
+                         saveStatus === 'success' ? 'Saved!' : 
+                         saveStatus === 'error' ? 'Error!' : 'Save Settings'}
+                      </button>
+                      <button 
+                        onClick={async () => {
+                          if (isSaving) return;
+                          setIsSaving(true);
+                          try {
+                            const res = await fetch('/api/dialer/manual-dial', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ phone: 'TEST_PING' })
+                            });
+                            if (!res.ok) {
+                              const data = await res.json();
+                              console.error("SIP Test failed:", data.error);
+                            }
+                          } catch (err) {
+                            console.error("SIP Test request failed:", err);
+                          } finally {
+                            setIsSaving(false);
+                          }
+                        }}
+                        disabled={isSaving}
+                        className={`bg-indigo-500 hover:bg-indigo-600 text-white font-black uppercase tracking-widest text-[10px] py-3 rounded-xl transition-all shadow-lg shadow-indigo-500/20 ${
+                          isSaving ? 'opacity-50 cursor-not-allowed' : ''
+                        }`}
+                      >
+                        {isSaving ? 'Testing...' : 'Test Connection'}
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -668,12 +2038,95 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                       <h4 className="text-[10px] font-black text-yellow-400 uppercase tracking-widest">Diagnosis: SIP Disconnected</h4>
                     </div>
                     <p className="text-xs text-white/40 leading-relaxed">
-                      Your SIP trunk is not configured. Sarah cannot make real calls until a valid SIP host is provided. 
+                      Your SIP trunk is not fully configured or aligned. Sarah cannot make real calls until a valid SIP host, user, and pass are provided. 
                       <br/><br/>
-                      <strong className="text-white">Fix:</strong> Enter your VoIP provider's SIP host and credentials above.
+                      <strong className="text-white">Alignment Tip:</strong> Use the exact same credentials you use in your Vicidial Carrier settings. If it works there, it will work here.
                     </p>
                   </div>
                 )}
+
+                {/* Manual Dial Pad */}
+                <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                  <h3 className="text-sm font-black uppercase tracking-widest mb-6 flex items-center gap-2">
+                    <Phone className="w-4 h-4 text-emerald-400" /> Manual Test Dial
+                  </h3>
+                  <div className="flex gap-4">
+                    <div className="flex-1">
+                      <input 
+                        type="tel" 
+                        value={manualPhone}
+                        onChange={(e) => setManualPhone(e.target.value)}
+                        placeholder="+1 (555) 000-0000"
+                        className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs text-white focus:border-emerald-500 transition-all"
+                      />
+                    </div>
+                    <button 
+                      onClick={handleManualDial}
+                      disabled={isDialing || !manualPhone}
+                      className={`px-6 py-3 rounded-xl font-black uppercase tracking-widest text-[10px] transition-all flex items-center gap-2 ${
+                        isDialing || !manualPhone
+                        ? 'bg-white/5 text-white/20 cursor-not-allowed'
+                        : 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20 hover:bg-emerald-600'
+                      }`}
+                    >
+                      <Play className="w-3 h-3" /> {isDialing ? 'Dialing...' : 'Dial'}
+                    </button>
+                  </div>
+                  <p className="text-[9px] text-white/20 mt-4 italic">Use this to manually test your SIP connection. Note: In this preview, audio is bridged via the AI Agent's voice stream once the call is answered.</p>
+                </div>
+
+                {/* SIP Debug Console */}
+                <div className="bg-black/40 rounded-[2rem] border border-white/10 p-8">
+                  <div className="flex items-center justify-between mb-6">
+                    <h3 className="text-sm font-black uppercase tracking-widest flex items-center gap-2">
+                      <Activity className="w-4 h-4 text-indigo-400" /> SIP Debug Console
+                    </h3>
+                    <button 
+                      onClick={onClearSipLogs}
+                      className="text-[9px] font-black uppercase tracking-widest text-white/20 hover:text-white transition-colors"
+                    >
+                      Clear Logs
+                    </button>
+                  </div>
+                  <div className="bg-black/60 rounded-xl p-4 h-48 overflow-y-auto font-mono text-[10px] space-y-2 custom-scrollbar border border-white/5">
+                    {sipLogs.length === 0 ? (
+                      <p className="text-white/20 italic">No SIP activity logged. Start a dial to see debug info.</p>
+                    ) : (
+                      sipLogs.map((log, i) => (
+                        <div key={i} className="flex gap-3">
+                          <span className="text-white/20 shrink-0">{log.time}</span>
+                          <span className={
+                            log.type === 'error' ? 'text-red-400' :
+                            log.type === 'success' ? 'text-emerald-400' :
+                            'text-indigo-300'
+                          }>{log.msg}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <p className="text-[9px] text-white/20 mt-4 italic">This console shows real-time SIP signaling. Use it to verify your credentials align with the provider.</p>
+                </div>
+
+                {/* Alignment Guide */}
+                <div className="bg-indigo-500/5 rounded-[2rem] border border-indigo-500/10 p-8">
+                  <h3 className="text-[10px] font-black uppercase tracking-widest mb-4 text-indigo-400 flex items-center gap-2">
+                    <ShieldCheck className="w-3 h-3" /> Alignment Checklist
+                  </h3>
+                  <ul className="space-y-3">
+                    <li className="flex items-start gap-3 text-[10px] text-white/60">
+                      <div className="w-1 h-1 rounded-full bg-indigo-500 mt-1.5 shrink-0"></div>
+                      <span><strong>Host:</strong> Ensure your SIP Server matches Vicidial (e.g., <code>trunk.provider.com</code>).</span>
+                    </li>
+                    <li className="flex items-start gap-3 text-[10px] text-white/60">
+                      <div className="w-1 h-1 rounded-full bg-indigo-500 mt-1.5 shrink-0"></div>
+                      <span><strong>Auth:</strong> Use the same <code>user</code> and <code>pass</code> as your Vicidial carrier settings.</span>
+                    </li>
+                    <li className="flex items-start gap-3 text-[10px] text-white/60">
+                      <div className="w-1 h-1 rounded-full bg-indigo-500 mt-1.5 shrink-0"></div>
+                      <span><strong>Firewall:</strong> Ensure your SIP provider allows traffic from this IP.</span>
+                    </li>
+                  </ul>
+                </div>
               </div>
 
               {/* Dialer Settings */}
@@ -715,21 +2168,29 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                       <p className="text-[9px] text-white/20 mt-2 italic">Total number of Sarah instances ready to handle answered calls.</p>
                     </div>
 
-                    <button 
-                      onClick={() => {
-                        const nextStatus = dialerConfig.status === 'active' ? 'idle' : 'active';
-                        const newConfig = {...dialerConfig, status: nextStatus};
-                        setDialerConfig(newConfig);
-                        syncDialerConfig(newConfig);
-                      }}
-                      className={`w-full py-4 rounded-xl font-black uppercase tracking-widest text-[10px] shadow-lg transition-all mt-4 ${
-                        dialerConfig.status === 'active' 
-                        ? 'bg-red-500 text-white shadow-red-500/20 hover:bg-red-600' 
-                        : 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20 hover:bg-indigo-600'
-                      }`}
-                    >
-                      {dialerConfig.status === 'active' ? 'Stop Campaign' : 'Start Campaign'}
-                    </button>
+                    <div className="grid grid-cols-2 gap-4">
+                      <button 
+                        onClick={() => syncDialerConfig(dialerConfig)}
+                        className="bg-white/5 hover:bg-white/10 text-white/60 hover:text-white font-black uppercase tracking-widest text-[10px] py-4 rounded-xl transition-all border border-white/10"
+                      >
+                        Save Settings
+                      </button>
+                      <button 
+                        onClick={() => {
+                          const nextStatus = dialerConfig.status === 'active' ? 'idle' : 'active';
+                          const newConfig = {...dialerConfig, status: nextStatus};
+                          setDialerConfig(newConfig);
+                          syncDialerConfig(newConfig);
+                        }}
+                        className={`py-4 rounded-xl font-black uppercase tracking-widest text-[10px] shadow-lg transition-all ${
+                          dialerConfig.status === 'active' 
+                          ? 'bg-red-500 text-white shadow-red-500/20 hover:bg-red-600' 
+                          : 'bg-indigo-500 text-white shadow-lg shadow-indigo-500/20 hover:bg-indigo-600'
+                        }`}
+                      >
+                        {dialerConfig.status === 'active' ? 'Stop Campaign' : 'Start Campaign'}
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -811,6 +2272,22 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
               </div>
 
               <div className="space-y-6">
+                <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
+                  <h4 className="text-[10px] font-black text-white/40 uppercase tracking-widest mb-4">Primary Script / Offer</h4>
+                  <div className="space-y-4">
+                    <div>
+                      <label className="text-[9px] text-white/20 uppercase font-black block mb-2">The Offer</label>
+                      <textarea 
+                        value={scriptOffer}
+                        onChange={(e) => setScriptOffer(e.target.value)}
+                        className="w-full bg-black/40 border border-white/5 rounded-xl px-4 py-3 text-xs font-mono text-white outline-none focus:border-indigo-500 resize-none h-24"
+                        placeholder="e.g. We're doing a full-house air duct cleaning for just $129."
+                      />
+                    </div>
+                    <p className="text-[10px] text-white/40 italic">This is what Sarah will say in her opening hook.</p>
+                  </div>
+                </div>
+
                 <div className="bg-white/5 rounded-[2rem] border border-white/10 p-8">
                   <h4 className="text-[10px] font-black text-white/40 uppercase tracking-widest mb-4">Agent Identity</h4>
                   <div className="space-y-4">
@@ -911,7 +2388,7 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
 
                     {/* Transcript Stream */}
                     <div className="bg-black/40 rounded-2xl p-4 h-32 overflow-y-auto mb-6 custom-scrollbar border border-white/5">
-                      {call.transcript.length === 0 ? (
+                      {!call.transcript || call.transcript.length === 0 ? (
                         <p className="text-[10px] text-white/10 italic">Waiting for audio stream...</p>
                       ) : (
                         call.transcript.map((line, i) => (

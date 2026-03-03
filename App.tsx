@@ -2,6 +2,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
 import { io, Socket } from 'socket.io-client';
+import JsSIP from 'jssip';
 import { getSystemInstructions, CHECK_CALENDAR_TOOL, BOOK_APPOINTMENT_TOOL, END_CALL_TOOL } from './constants';
 import { CallSession, CallDisposition } from './types';
 import { OrchestrationDashboard } from './src/components/Dashboard';
@@ -60,12 +61,39 @@ const App: React.FC = () => {
   const [listeningToId, setListeningToId] = useState<string | null>(null);
   const [uploadedLeads, setUploadedLeads] = useState<any[]>([]);
   const [customRebuttals, setCustomRebuttals] = useState<string>("");
+  const [agentName, setAgentName] = useState<string>("Sarah");
+  const [scriptOffer, setScriptOffer] = useState<string>("We're doing a full-house air duct cleaning for just $129.");
   const [appointments, setAppointments] = useState<any[]>([]);
   const [cacheStats, setCacheStats] = useState({ hits: 0, misses: 0 });
   const [dailyCost, setDailyCost] = useState(0);
+  const [sipLogs, setSipLogs] = useState<any[]>([]);
+  const [webrtcStatus, setWebrtcStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
+  const [reconnectTrigger, setReconnectTrigger] = useState(0);
+  const lastConnectTimeRef = useRef<number>(0);
   const socketRef = useRef<Socket | null>(null);
   const voiceCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
   const spokenLinesRef = useRef<Set<string>>(new Set());
+
+  const [dialerConfig, setDialerConfig] = useState<any>(() => {
+    const saved = localStorage.getItem('dialer_config');
+    if (saved) return JSON.parse(saved);
+    return {
+      concurrency: 5,
+      activeAgents: 20,
+      sipServer: '93.127.128.38',
+      sipPort: '5060',
+      sipUser: '78623',
+      sipPass: 'test',
+      wsUrl: 'wss://93.127.128.38:8089/ws',
+      webrtcUser: '78623',
+      webrtcPass: 'test',
+      status: 'idle'
+    };
+  });
+
+  useEffect(() => {
+    localStorage.setItem('dialer_config', JSON.stringify(dialerConfig));
+  }, [dialerConfig]);
 
   // --- Real-Time Backend Sync ---
   useEffect(() => {
@@ -73,10 +101,21 @@ const App: React.FC = () => {
     socketRef.current = socket;
 
     socket.on('init', (data) => {
-      setUploadedLeads(new Array(data.leads.total).fill({}));
-      setActiveCalls(data.activeCalls);
-      setDispositions(data.dispositions);
-      setAppointments(data.appointments);
+      console.log("[SOCKET] Init data received:", data.dialerConfig);
+      setUploadedLeads(new Array(data.leads?.total || 0).fill({}));
+      setActiveCalls(data.activeCalls || []);
+      setDispositions(data.dispositions || []);
+      setAppointments(data.appointments || []);
+      if (data.dialerConfig) {
+        setDialerConfig(prev => {
+          // If we have a local config that is different from server, 
+          // we might want to prioritize server if it's a fresh load
+          if (JSON.stringify(prev) === JSON.stringify(data.dialerConfig)) return prev;
+          console.log("[SOCKET] Updating dialerConfig from server init");
+          return data.dialerConfig;
+        });
+        setIsCampaignActive(data.dialerConfig.status === 'active');
+      }
     });
 
     socket.on('call:started', (call) => {
@@ -92,6 +131,25 @@ const App: React.FC = () => {
       setUploadedLeads(new Array(data.total).fill({}));
     });
 
+    socket.on('config:update', (config) => {
+      setDialerConfig(prev => {
+        if (JSON.stringify(prev) === JSON.stringify(config)) return prev;
+        return config;
+      });
+      setIsCampaignActive(config.status === 'active');
+    });
+
+    socket.on('dialerConfigUpdate', (newConfig) => {
+      setDialerConfig(prev => {
+        if (JSON.stringify(prev) === JSON.stringify(newConfig)) return prev;
+        return newConfig;
+      });
+    });
+
+    socket.on('sip:log', (logs) => {
+      setSipLogs(prev => [...prev, ...(Array.isArray(logs) ? logs : [logs])].slice(-50));
+    });
+
     return () => {
       socket.disconnect();
     };
@@ -105,7 +163,7 @@ const App: React.FC = () => {
     }
     
     const call = activeCalls.find(c => c.id === listeningToId);
-    if (!call || call.transcript.length === 0) return;
+    if (!call || !call.transcript || call.transcript.length === 0) return;
     
     const lastLine = call.transcript[call.transcript.length - 1];
     const lineId = `${call.id}-${call.transcript.length}-${lastLine}`;
@@ -201,6 +259,9 @@ const App: React.FC = () => {
   }, [activeCalls, listeningToId, selectedVoice, isCampaignActive]);
 
   const sessionRef = useRef<any>(null);
+  const sipUaRef = useRef<any>(null);
+  const sipSessionRef = useRef<any>(null);
+  const sarahVoiceDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const inputAudioContextRef = useRef<AudioContext | null>(null);
   const outputAudioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -210,9 +271,11 @@ const App: React.FC = () => {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
+  const isActiveRef = useRef(false);
   
   const currentInputTranscription = useRef('');
   const currentOutputTranscription = useRef('');
+  const isSipCallRef = useRef(false);
 
   useEffect(() => {
     // Simulate fetching lead data from VICIdial URL parameters
@@ -238,6 +301,7 @@ const App: React.FC = () => {
 
   const stopSession = useCallback(() => {
     setIsActive(false);
+    isActiveRef.current = false;
     setIsModelSpeaking(false);
     setIsUserSpeaking(false);
     setListeningToId(null);
@@ -248,6 +312,10 @@ const App: React.FC = () => {
     if (sessionRef.current) {
       try { sessionRef.current.close(); } catch (e) {}
       sessionRef.current = null;
+    }
+    if (sipSessionRef.current) {
+      try { sipSessionRef.current.terminate(); } catch (e) {}
+      sipSessionRef.current = null;
     }
     if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
       try { inputAudioContextRef.current.close(); } catch (e) {}
@@ -261,6 +329,7 @@ const App: React.FC = () => {
       try { s.stop(); } catch (e) {}
     });
     sourcesRef.current.clear();
+    setSilenceDuration(0);
     window.speechSynthesis.cancel();
   }, []);
 
@@ -293,8 +362,18 @@ const App: React.FC = () => {
     }
   }, [isCampaignActive]);
 
-  const startSession = async () => {
+  const startSession = async (incomingStream?: MediaStream): Promise<void> => {
+    if (isActiveRef.current) {
+      console.warn("[Sarah] Session already active, ignoring start request.");
+      return;
+    }
+    
     try {
+      console.log("[Sarah] Starting session...", incomingStream ? "SIP Call" : "Local Test");
+      isActiveRef.current = true;
+      setIsActive(true);
+      
+      isSipCallRef.current = !!incomingStream;
       const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
       if (!apiKey) {
         throw new Error("Gemini API Key not found. Please ensure it is set in the environment.");
@@ -304,6 +383,8 @@ const App: React.FC = () => {
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       
+      // Ensure the incoming stream is compatible with the input context
+      // If it's a SIP stream, we might need to pipe it through a MediaStreamSource in the same context
       await inputCtx.resume();
       await outputCtx.resume();
       
@@ -311,13 +392,21 @@ const App: React.FC = () => {
       analyser.fftSize = 256;
       analyserRef.current = analyser;
       
+      // Create a destination for Sarah's voice to send back to SIP
+      const sarahVoiceDest = outputCtx.createMediaStreamDestination();
+      sarahVoiceDestRef.current = sarahVoiceDest;
+
       inputAudioContextRef.current = inputCtx;
       outputAudioContextRef.current = outputCtx;
       nextStartTimeRef.current = 0;
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = incomingStream || await navigator.mediaDevices.getUserMedia({ audio: true });
+      console.log("[Sarah] Using audio stream:", stream.id, "Tracks:", stream.getAudioTracks().length);
+      if (incomingStream) {
+        console.log("[Sarah] SIP Remote Stream tracks:", incomingStream.getAudioTracks().map(t => `${t.label} (${t.enabled ? 'enabled' : 'disabled'})`));
+      }
 
-      // Setup Recording
+      // Setup Recording (Both Sarah and User)
       const recorderDest = outputCtx.createMediaStreamDestination();
       const userSource = outputCtx.createMediaStreamSource(stream);
       userSource.connect(recorderDest);
@@ -360,7 +449,7 @@ const App: React.FC = () => {
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
         config: {
           responseModalities: [Modality.AUDIO],
-          systemInstruction: getSystemInstructions(customRebuttals),
+          systemInstruction: getSystemInstructions(customRebuttals, agentName, scriptOffer),
           tools: [{ functionDeclarations: [CHECK_CALENDAR_TOOL, BOOK_APPOINTMENT_TOOL, END_CALL_TOOL] }],
           outputAudioTranscription: {},
           inputAudioTranscription: {},
@@ -385,16 +474,27 @@ const App: React.FC = () => {
               }
 
               const source = inputCtx.createMediaStreamSource(stream);
+              
+              // Add a gain node to boost input if needed
+              const inputGain = inputCtx.createGain();
+              inputGain.gain.value = 1.5; // Slight boost for SIP audio
+              source.connect(inputGain);
+
               const scriptProcessor = inputCtx.createScriptProcessor(2048, 1, 1);
               scriptProcessorRef.current = scriptProcessor;
               scriptProcessor.onaudioprocess = (e) => {
                 const inputData = e.inputBuffer.getChannelData(0);
                 const sum = inputData.reduce((a, b) => a + Math.abs(b), 0);
                 const volume = sum / inputData.length;
-                const isSpeaking = volume > 0.01;
+                const isSpeaking = volume > 0.005; // Lower threshold for SIP audio
                 setIsUserSpeaking(isSpeaking);
                 
-                if (!isSpeaking && isActive) {
+                // Debug log for audio input (1% of frames)
+                if (Math.random() < 0.01 && volume > 0) {
+                  console.log("[Sarah] Audio input detected, volume:", volume.toFixed(4));
+                }
+                
+                if (!isSpeaking && isActiveRef.current) {
                   setSilenceDuration(prev => prev + (2048 / 16000));
                 } else {
                   setSilenceDuration(0);
@@ -414,7 +514,7 @@ const App: React.FC = () => {
                   } 
                 });
               };
-              source.connect(scriptProcessor);
+              inputGain.connect(scriptProcessor);
               scriptProcessor.connect(inputCtx.destination);
             });
           },
@@ -429,7 +529,17 @@ const App: React.FC = () => {
               source.buffer = buffer;
               
               source.connect(analyserRef.current);
-              analyserRef.current.connect(outputCtx.destination);
+              
+              // Bridge Sarah's voice back to the SIP caller
+              if (sarahVoiceDestRef.current) {
+                source.connect(sarahVoiceDestRef.current);
+              }
+
+              // Only play to local speakers if we are NOT in a SIP call 
+              // or if we want to monitor the AI.
+              if (!isSipCallRef.current) {
+                analyserRef.current.connect(outputCtx.destination);
+              }
               
               source.addEventListener('ended', () => {
                 sourcesRef.current.delete(source);
@@ -456,7 +566,7 @@ const App: React.FC = () => {
               setActiveCalls(prev => prev.map(c => c.id === 'live-session' ? {
                 ...c,
                 status: 'AI_SPEAKING',
-                transcript: [...c.transcript.slice(-10), `Sarah: ${text}`]
+                transcript: [...(c.transcript || []).slice(-10), `Sarah: ${text}`]
               } : c));
             }
 
@@ -466,7 +576,7 @@ const App: React.FC = () => {
               setActiveCalls(prev => prev.map(c => c.id === 'live-session' ? {
                 ...c,
                 status: 'CUSTOMER_SPEAKING',
-                transcript: [...c.transcript.slice(-10), `Customer: ${text}`]
+                transcript: [...(c.transcript || []).slice(-10), `Customer: ${text}`]
               } : c));
             }
 
@@ -550,6 +660,7 @@ const App: React.FC = () => {
       });
             sessionRef.current = await sessionPromise;
             setIsActive(true);
+            isActiveRef.current = true;
 
             // Add to active calls, ensuring no duplicates
             const newCall: CallSession = {
@@ -572,8 +683,8 @@ const App: React.FC = () => {
               return [newCall, ...prev];
             });
     } catch (err: any) {
-      console.error("Start session failed:", err);
-      alert("Microphone access is required for the voice agent.");
+      console.error("[Sarah] Session initialization failed:", err);
+      stopSession();
     }
   };
 
@@ -610,6 +721,227 @@ const App: React.FC = () => {
     }
   };
 
+  // --- Vicidial WebRTC Bridge ---
+  const lastConfigRef = useRef<string>('');
+  useEffect(() => {
+    if (!dialerConfig.wsUrl || !dialerConfig.webrtcUser || !dialerConfig.webrtcPass) return;
+
+    // Only restart if the actual connection parameters changed
+    const currentConfig = JSON.stringify({
+      url: dialerConfig.wsUrl,
+      user: dialerConfig.webrtcUser,
+      pass: dialerConfig.webrtcPass,
+      server: dialerConfig.sipServer,
+      trigger: reconnectTrigger
+    });
+    
+    if (currentConfig === lastConfigRef.current) return;
+    
+    // Prevent reconnection loops (max once every 5 seconds)
+    const now = Date.now();
+    if (now - lastConnectTimeRef.current < 5000) {
+      console.warn("[SIP] Reconnection cooldown active. Waiting...");
+      const timer = setTimeout(() => setReconnectTrigger(prev => prev + 1), 5000);
+      return () => clearTimeout(timer);
+    }
+    lastConnectTimeRef.current = now;
+    lastConfigRef.current = currentConfig;
+
+    console.log("[SIP] Initializing UA with config:", dialerConfig.wsUrl, dialerConfig.webrtcUser);
+
+    // Enable detailed SIP debugging in browser console
+    JsSIP.debug.enable('JsSIP:*');
+
+    try {
+      const socket = new JsSIP.WebSocketInterface(dialerConfig.wsUrl);
+      const sipServer = (dialerConfig.sipServer || '93.127.128.38').trim().replace(/\.+$/, '');
+      
+      // Ensure we have a valid user and domain
+      const cleanUser = dialerConfig.webrtcUser.trim();
+      const cleanDomain = sipServer || '93.127.128.38';
+      
+      // Construct URI carefully
+      const sipUri = cleanUser.includes('@') ? `sip:${cleanUser}` : `sip:${cleanUser}@${cleanDomain}`;
+
+      const configuration = {
+        sockets: [socket],
+        uri: sipUri,
+        password: dialerConfig.webrtcPass,
+        authorization_user: dialerConfig.webrtcUser,
+        display_name: 'Sarah AI Agent',
+        register: true,
+        register_expires: 600,
+        session_timers: false,
+        hack_ip_in_contact: true,
+        connection_recovery_min_interval: 2,
+        connection_recovery_max_interval: 30
+      };
+
+      console.log("[SIP] Creating UA with URI:", sipUri);
+      const ua = new JsSIP.UA(configuration);
+      sipUaRef.current = ua;
+
+      ua.on('connecting', () => {
+        setWebrtcStatus('connecting');
+        setSipLogs(prev => [{ type: 'info', msg: `Connecting to ${dialerConfig.wsUrl}...`, time: new Date().toLocaleTimeString() }, ...prev]);
+        
+        if (window.location.protocol === 'https:' && dialerConfig.wsUrl.startsWith('ws://')) {
+          setSipLogs(prev => [{ type: 'error', msg: `CRITICAL: Browser will block insecure "ws://" on HTTPS. Click "Auto-Fix" in settings.`, time: new Date().toLocaleTimeString() }, ...prev]);
+        }
+      });
+
+    ua.on('connected', () => {
+      setSipLogs(prev => [{ type: 'success', msg: `WebSocket Connected!`, time: new Date().toLocaleTimeString() }, ...prev]);
+    });
+
+    ua.on('registered', () => {
+      setWebrtcStatus('connected');
+      setSipLogs(prev => [{ type: 'success', msg: `SIP Registered (200 OK)`, time: new Date().toLocaleTimeString() }, ...prev]);
+    });
+
+    ua.on('registrationFailed', (e: any) => {
+      setWebrtcStatus('error');
+      const responseCode = e.response ? e.response.status_code : 'No Response';
+      const cause = e.cause || 'Unknown Cause';
+      
+      let msg = `Registration Failed: ${cause} (${responseCode})`;
+      if (responseCode === 403 || responseCode === 401) {
+        msg = `Registration Conflict: Extension ${dialerConfig.webrtcUser} might be in use elsewhere.`;
+        // Stop the UA to prevent aggressive retry loops
+        setTimeout(() => {
+          if (sipUaRef.current) {
+            sipUaRef.current.stop();
+            setWebrtcStatus('error');
+          }
+        }, 1000);
+      }
+      
+      setSipLogs(prev => [{ type: 'error', msg, time: new Date().toLocaleTimeString() }, ...prev]);
+      console.error("[SIP] Registration Failed:", cause, e.response);
+    });
+
+    ua.on('sipEvent', (e: any) => {
+      const direction = e.event === 'request' ? 'OUT' : 'IN';
+      const msg = e.request ? e.request.method : (e.response ? `${e.response.status_code} ${e.response.reason_phrase}` : 'Event');
+      setSipLogs(prev => [{ type: 'info', msg: `[${direction}] ${msg}`, time: new Date().toLocaleTimeString() }, ...prev]);
+    });
+
+    ua.on('disconnected', (e: any) => {
+      setWebrtcStatus('disconnected');
+      const cause = e.cause || 'Normal';
+      setSipLogs(prev => [{ type: 'info', msg: `Disconnected (${cause}).`, time: new Date().toLocaleTimeString() }, ...prev]);
+      console.log("[SIP] Disconnected:", cause);
+    });
+
+    ua.on('newRTCSession', (data: any) => {
+      const session = data.session;
+      
+      // If Sarah is already on a call, reject the new one
+      if (isActiveRef.current || sipSessionRef.current) {
+        console.warn("[SIP] Sarah is busy, rejecting incoming call from:", session.remote_identity.uri.toString());
+        session.terminate({ status_code: 486, reason_phrase: "Busy Here" });
+        return;
+      }
+
+      sipSessionRef.current = session;
+      let sessionStarted = false;
+
+      if (session.direction === 'incoming') {
+        session.on('peerconnection', (e: any) => {
+          const pc = e.peerconnection;
+          pc.ontrack = (event: any) => {
+            const remoteStream = event.streams[0];
+            if (!remoteStream) {
+              console.warn("[SIP] No remote stream found in ontrack event");
+              return;
+            }
+
+            const audioTracks = remoteStream.getAudioTracks();
+            if (audioTracks.length === 0) {
+              console.warn("[SIP] No audio tracks found in remote stream");
+              return;
+            }
+
+            console.log(`[SIP] Remote audio track detected: ${audioTracks[0].label} (${audioTracks[0].id})`);
+
+            // Only start if not already active to avoid double sessions
+            if (!isActiveRef.current && !sessionStarted) {
+              sessionStarted = true;
+              console.log("[SIP] Incoming call track detected, starting Sarah AI session...");
+              startSession(remoteStream).then(() => {
+                if (sarahVoiceDestRef.current) {
+                  const sarahStream = sarahVoiceDestRef.current.stream;
+                  const sarahTrack = sarahStream.getAudioTracks()[0];
+                  
+                  // Find the sender that's currently sending (likely the mic from answer())
+                  const sender = pc.getSenders().find((s: any) => s.track && s.track.kind === 'audio');
+                  if (sender) {
+                    console.log("[SIP] Swapping mic track with Sarah AI voice track");
+                    sender.replaceTrack(sarahTrack);
+                  } else {
+                    console.log("[SIP] No sender found, adding Sarah track");
+                    pc.addTrack(sarahTrack, sarahStream);
+                  }
+                }
+              }).catch(err => {
+                console.error("[SIP] Failed to start Sarah AI session:", err);
+                session.terminate();
+              });
+            }
+          };
+        });
+
+        session.answer({
+          mediaConstraints: { audio: true, video: false }
+        });
+      }
+
+      session.on('ended', () => {
+        console.log("[SIP] Call ended by remote/local");
+        stopSession();
+        sipSessionRef.current = null;
+      });
+
+      session.on('failed', (e: any) => {
+        console.warn("[SIP] Call failed:", e.cause);
+        stopSession();
+        sipSessionRef.current = null;
+      });
+    });
+
+      const startTimeout = setTimeout(() => {
+        try {
+          console.log("[SIP] Starting UA...");
+          ua.start();
+        } catch (e) {
+          console.error("[SIP] UA Start Failed:", e);
+          setWebrtcStatus('error');
+          setSipLogs(prev => [{ type: 'error', msg: `UA Start Failed: ${e instanceof Error ? e.message : 'Unknown error'}`, time: new Date().toLocaleTimeString() }, ...prev]);
+        }
+      }, 500);
+
+      return () => {
+        clearTimeout(startTimeout);
+        console.log("[SIP] Stopping UA and cleaning up...");
+        if (ua) {
+          if (ua.isRegistered()) {
+            ua.unregister();
+          }
+          ua.stop();
+        }
+        if (socket && typeof socket.disconnect === 'function') {
+          socket.disconnect();
+        }
+        sipUaRef.current = null;
+      };
+    } catch (e) {
+      console.error("[SIP] UA Initialization Failed:", e);
+      setWebrtcStatus('error');
+      setSipLogs(prev => [{ type: 'error', msg: `UA Init Failed: ${e instanceof Error ? e.message : 'Unknown error'}`, time: new Date().toLocaleTimeString() }, ...prev]);
+      return () => {};
+    }
+  }, [dialerConfig, reconnectTrigger]);
+
   return (
     <div className="min-h-screen bg-[#050505] text-white flex flex-col overflow-hidden">
       {/* Orchestration Dashboard */}
@@ -626,6 +958,8 @@ const App: React.FC = () => {
           onStop={handleStopCall}
           onStartLive={startSession}
           onStopLive={stopSession}
+          dialerConfig={dialerConfig}
+          onUpdateDialerConfig={setDialerConfig}
           cacheStats={cacheStats}
           onUploadLeads={async (leads) => {
             try {
@@ -648,12 +982,33 @@ const App: React.FC = () => {
             setLastAction("Sarah's Brain Updated with New Rebuttals.");
             setTimeout(() => setLastAction(null), 3000);
           }}
+          agentName={agentName}
+          onUpdateAgentName={(name) => {
+            setAgentName(name);
+            setLastAction(`Agent Identity Updated to ${name}.`);
+            setTimeout(() => setLastAction(null), 3000);
+          }}
+          scriptOffer={scriptOffer}
+          onUpdateScriptOffer={(offer) => {
+            setScriptOffer(offer);
+            setLastAction("Sarah's Script Offer Updated.");
+            setTimeout(() => setLastAction(null), 3000);
+          }}
+          webrtcStatus={webrtcStatus}
           dailyCost={dailyCost}
           isLiveActive={isActive}
           listeningToId={listeningToId}
           appointments={appointments}
           onUpdateAppointments={setAppointments}
+          onConnectSip={() => {
+            setReconnectTrigger(prev => prev + 1);
+            setLastAction("Forcing Sarah Reconnection...");
+            setTimeout(() => setLastAction(null), 3000);
+          }}
           uploadedLeads={uploadedLeads}
+          sipLogs={sipLogs}
+          onClearSipLogs={() => setSipLogs([])}
+          onUpdateSipLogs={setSipLogs}
         />
       </div>
 

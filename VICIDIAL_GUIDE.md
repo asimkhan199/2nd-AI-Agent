@@ -89,6 +89,65 @@ The number of concurrent Sarah AI agents depends on three factors:
 8. In the **Campaign Settings**, set the **Start Call URL** to:
    `https://your-sarah-app.run.app/api/vicidial/call-start?lead_id=--A--lead_id--B--&phone_number=--A--phone_number--B--`
 
+## Step 6: Self-Hosted ViciBox Installation Guide (Sarah-Ready)
+
+If you have your own server (VPS or Physical), follow these steps to install a version of Vicidial that is pre-configured for Sarah AI.
+
+### 6.1 OS Installation
+1. Download the **ViciBox 11 ISO** from [vicibox.com](https://vicibox.com).
+2. Boot your server from the ISO.
+3. Login with user `root` and password `vicidial`.
+4. Run `os-install`. Follow the prompts to set your timezone and network. **Crucial: Set a Static IP.**
+
+### 6.2 Vicidial Installation
+1. Reboot after `os-install`.
+2. Run `vicibox-install`.
+3. Select **Express Install** (Option 1) for a single-server setup.
+4. When asked for the SVN version, use the default (latest).
+
+### 6.3 SSL Certificate (Mandatory for WebRTC)
+WebRTC (Sarah) will **not** work without HTTPS.
+1. Run `vicibox-cert`.
+2. This will set up a self-signed certificate or Let's Encrypt.
+3. If using self-signed, you must manually "Proceed" in your browser (as shown in the Sarah Dashboard).
+
+### 6.4 WebRTC Configuration (The "Real Work")
+To allow Sarah to connect, you must enable the WebRTC bridge in Asterisk:
+
+**Edit `/etc/asterisk/http.conf`:**
+```ini
+[general]
+enabled=yes
+bindaddr=0.0.0.0
+bindport=8088
+tlsenable=yes
+tlsbindaddr=0.0.0.0:8089
+tlscertfile=/etc/apache2/ssl.crt/vicidial.crt
+tlsprivatekey=/etc/apache2/ssl.key/vicidial.key
+```
+
+**Edit `/etc/asterisk/sip.conf`:**
+```ini
+[general]
+realm=your.server.ip
+udpbindaddr=0.0.0.0
+transport=udp,ws,wss
+```
+
+### 6.5 Firewall Configuration
+Open these ports in your firewall (`yast firewall` or `iptables`):
+- **80/443**: Web Interface
+- **5060**: SIP Signaling
+- **8089**: WebRTC WebSocket (Sarah's Connection)
+- **10000-20000**: RTP Audio (The actual voice)
+
+### 6.6 Create the Sarah Phone
+1. Go to **Admin -> Phones -> Add New Phone**.
+2. **Extension**: `78602`
+3. **Set As Webphone**: `Y`
+4. **Phone Context**: `vicidial-auto`
+5. **Template ID**: `static-RTC` (This is a built-in ViciBox template for WebRTC).
+
 ---
 
 ## Security Note
