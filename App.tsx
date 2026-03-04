@@ -82,10 +82,10 @@ const App: React.FC = () => {
       activeAgents: 20,
       sipServer: '93.127.128.38',
       sipPort: '5060',
-      sipUser: '78623',
+      sipUser: '78624',
       sipPass: 'test',
       wsUrl: 'wss://93.127.128.38:8089/ws',
-      webrtcUser: '78623',
+      webrtcUser: '78624',
       webrtcPass: 'test',
       status: 'idle'
     };
@@ -473,25 +473,43 @@ const App: React.FC = () => {
                 console.warn("Could not send initial text trigger:", e);
               }
 
+              // Hard fix for remote audio: create a hidden audio element to keep the stream active
+              // We use a global-ish element to avoid GC issues
+              let remoteAudio = document.getElementById('sarah-remote-audio') as HTMLAudioElement;
+              if (!remoteAudio) {
+                remoteAudio = document.createElement('audio');
+                remoteAudio.id = 'sarah-remote-audio';
+                remoteAudio.style.display = 'none';
+                document.body.appendChild(remoteAudio);
+              }
+              remoteAudio.srcObject = stream;
+              remoteAudio.muted = false; // Try unmuted but volume 0
+              remoteAudio.volume = 0;
+              remoteAudio.play().catch(e => console.warn("[Sarah] Audio play failed:", e));
+
               const source = inputCtx.createMediaStreamSource(stream);
               
-              // Add a gain node to boost input if needed
+              // Add a gain node to boost input significantly
               const inputGain = inputCtx.createGain();
-              inputGain.gain.value = 1.5; // Slight boost for SIP audio
+              inputGain.gain.value = 4.0; // Even stronger boost for SIP audio
               source.connect(inputGain);
 
               const scriptProcessor = inputCtx.createScriptProcessor(2048, 1, 1);
               scriptProcessorRef.current = scriptProcessor;
+              let debugCount = 0;
               scriptProcessor.onaudioprocess = (e) => {
                 const inputData = e.inputBuffer.getChannelData(0);
                 const sum = inputData.reduce((a, b) => a + Math.abs(b), 0);
                 const volume = sum / inputData.length;
-                const isSpeaking = volume > 0.005; // Lower threshold for SIP audio
+                const isSpeaking = volume > 0.001; // Maximum sensitivity
                 setIsUserSpeaking(isSpeaking);
                 
-                // Debug log for audio input (1% of frames)
-                if (Math.random() < 0.01 && volume > 0) {
-                  console.log("[Sarah] Audio input detected, volume:", volume.toFixed(4));
+                // Aggressive debug logging for first 50 frames
+                if (debugCount < 50) {
+                  console.log("[Sarah] Audio frame:", debugCount, "Volume:", volume.toFixed(6), "IsSpeaking:", isSpeaking);
+                  debugCount++;
+                } else if (Math.random() < 0.05 && volume > 0) {
+                  console.log("[Sarah] Audio input detected, volume:", volume.toFixed(6));
                 }
                 
                 if (!isSpeaking && isActiveRef.current) {
@@ -850,7 +868,11 @@ const App: React.FC = () => {
         session.on('peerconnection', (e: any) => {
           const pc = e.peerconnection;
           pc.ontrack = (event: any) => {
-            const remoteStream = event.streams[0];
+            console.log("[SIP] Ontrack event:", event.track.kind, event.track.label);
+            
+            // Hard fix: Ensure we have a valid stream from the track
+            const remoteStream = event.streams[0] || new MediaStream([event.track]);
+            
             if (!remoteStream) {
               console.warn("[SIP] No remote stream found in ontrack event");
               return;
@@ -995,6 +1017,7 @@ const App: React.FC = () => {
             setTimeout(() => setLastAction(null), 3000);
           }}
           webrtcStatus={webrtcStatus}
+          isUserSpeaking={isUserSpeaking}
           dailyCost={dailyCost}
           isLiveActive={isActive}
           listeningToId={listeningToId}

@@ -35,6 +35,7 @@ interface DashboardProps {
   onClearSipLogs?: () => void;
   onUpdateSipLogs?: (logs: any[] | ((prev: any[]) => any[])) => void;
   onUpdateDialerConfig?: (config: any) => void;
+  isUserSpeaking?: boolean;
 }
 
 export const OrchestrationDashboard: React.FC<DashboardProps> = ({ 
@@ -67,7 +68,8 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
   sipLogs = [],
   onClearSipLogs,
   onUpdateSipLogs: setSipLogs,
-  onUpdateDialerConfig: setDialerConfig
+  onUpdateDialerConfig: setDialerConfig,
+  isUserSpeaking = false
 }) => {
   const [outboundIp, setOutboundIp] = useState<string>('Detecting...');
 
@@ -1350,6 +1352,15 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                     <div className="flex justify-between items-center">
                       <span className="text-white/20 uppercase font-black text-[9px]">Sarah Identity</span>
                       <span className="text-white font-bold">{agentName}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-white/20 uppercase font-black text-[9px]">Input Audio</span>
+                      <div className="flex items-center gap-2">
+                        <div className={`w-2 h-2 rounded-full transition-all duration-75 ${isUserSpeaking ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)] scale-125' : 'bg-white/10'}`}></div>
+                        <span className={`text-[10px] font-bold ${isUserSpeaking ? 'text-emerald-400' : 'text-white/20'}`}>
+                          {isUserSpeaking ? 'DETECTED' : 'SILENT'}
+                        </span>
+                      </div>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-white/20 uppercase font-black text-[9px]">SIP Server</span>
