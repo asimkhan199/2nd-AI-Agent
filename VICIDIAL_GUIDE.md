@@ -143,7 +143,7 @@ Open these ports in your firewall (`yast firewall` or `iptables`):
 
 ### 6.6 Create the Sarah Phone
 1. Go to **Admin -> Phones -> Add New Phone**.
-2. **Extension**: `78602`
+2. **Extension**: `78624`
 3. **Set As Webphone**: `Y`
 4. **Phone Context**: `vicidial-auto`
 5. **Template ID**: `static-RTC` (This is a built-in ViciBox template for WebRTC).

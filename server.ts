@@ -35,10 +35,10 @@ async function startServer() {
     activeAgents: 20,
     sipServer: '93.127.128.38',
     sipPort: '5060',
-    sipUser: '78602',
+    sipUser: '78624',
     sipPass: 'test',
     wsUrl: 'wss://93.127.128.38:8089/ws',
-    webrtcUser: '78602',
+    webrtcUser: '78624',
     webrtcPass: 'test',
     status: 'idle'
   };
@@ -191,6 +191,17 @@ async function startServer() {
     }
     io.emit('config:update', dialerConfig);
     res.json({ success: true, config: dialerConfig });
+  });
+
+  app.post("/api/appointments", (req, res) => {
+    const newAppt = {
+      ...req.body,
+      id: uuidv4(),
+      bookedAt: new Date().toISOString()
+    };
+    appointments = [newAppt, ...appointments];
+    io.emit('appointment:new', newAppt);
+    res.json({ success: true, appointment: newAppt });
   });
 
   app.get("/api/stats", (req, res) => {

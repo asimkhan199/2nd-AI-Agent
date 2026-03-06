@@ -6,7 +6,7 @@ import JsSIP from 'jssip';
 import { getSystemInstructions, CHECK_CALENDAR_TOOL, BOOK_APPOINTMENT_TOOL, END_CALL_TOOL } from './constants';
 import { CallSession, CallDisposition } from './types';
 import { OrchestrationDashboard } from './src/components/Dashboard';
-import { Play, PhoneOff, Users, X, Settings } from 'lucide-react';
+import { Play, PhoneOff, Users, X, Settings, MicOff } from 'lucide-react';
 
 function encode(bytes: Uint8Array) {
   return btoa(String.fromCharCode.apply(null, bytes as any));
@@ -47,10 +47,12 @@ const App: React.FC = () => {
   const [isUserSpeaking, setIsUserSpeaking] = useState(false);
   const [isModelSpeaking, setIsModelSpeaking] = useState(false);
   const [selectedVoice, setSelectedVoice] = useState<'Kore' | 'Puck' | 'Charon' | 'Fenrir' | 'Zephyr'>('Kore');
+  const [sensitivity, setSensitivity] = useState(2.5);
   const [showSettings, setShowSettings] = useState(false);
   const [callLogs, setCallLogs] = useState<{ id: string; reason: string; timestamp: string }[]>([]);
   const [lastAction, setLastAction] = useState<string | null>(null);
   const [silenceDuration, setSilenceDuration] = useState(0);
+  const [currentVolume, setCurrentVolume] = useState(0);
   const [isSafetyHangup, setIsSafetyHangup] = useState(false);
   const [leadInfo, setLeadInfo] = useState<{ id: string; name: string; phone: string; address: string } | null>(null);
   
@@ -87,13 +89,44 @@ const App: React.FC = () => {
       wsUrl: 'wss://93.127.128.38:8089/ws',
       webrtcUser: '78624',
       webrtcPass: 'test',
-      status: 'idle'
+      status: 'idle',
+      profileName: 'Farrukh bhai'
     };
+  });
+
+  const [sipProfiles, setSipProfiles] = useState<any[]>(() => {
+    const saved = localStorage.getItem('sip_profiles');
+    if (saved) return JSON.parse(saved);
+    return [{
+      id: 'default-farrukh',
+      name: 'Farrukh bhai',
+      server: '93.127.128.38',
+      port: '5060',
+      user: '78624',
+      pass: 'test',
+      wsUrl: 'wss://93.127.128.38:8089/ws',
+      webrtcUser: '78624',
+      webrtcPass: 'test'
+    }];
   });
 
   useEffect(() => {
     localStorage.setItem('dialer_config', JSON.stringify(dialerConfig));
   }, [dialerConfig]);
+
+  useEffect(() => {
+    localStorage.setItem('sip_profiles', JSON.stringify(sipProfiles));
+  }, [sipProfiles]);
+
+  useEffect(() => {
+    // Auto-connect SIP on start
+    const timer = setTimeout(() => {
+      if (webrtcStatus === 'disconnected') {
+        setReconnectTrigger(prev => prev + 1);
+      }
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, []);
 
   // --- Real-Time Backend Sync ---
   useEffect(() => {
@@ -144,6 +177,17 @@ const App: React.FC = () => {
         if (JSON.stringify(prev) === JSON.stringify(newConfig)) return prev;
         return newConfig;
       });
+    });
+
+    socket.on('appointment:new', (appt) => {
+      setAppointments(prev => {
+        if (prev.some(a => a.id === appt.id)) return prev;
+        return [appt, ...prev];
+      });
+      triggerNotification(
+        `🎉 New Booking: ${appt.firstName}!`,
+        `Appointment confirmed for ${appt.time} at ${appt.address}. Price: ${appt.price}`
+      );
     });
 
     socket.on('sip:log', (logs) => {
@@ -276,6 +320,19 @@ const App: React.FC = () => {
   const currentInputTranscription = useRef('');
   const currentOutputTranscription = useRef('');
   const isSipCallRef = useRef(false);
+  const noiseFloorRef = useRef(0.001);
+
+  const forceInterrupt = useCallback(() => {
+    console.log("[Sarah] Manual interruption triggered.");
+    sourcesRef.current.forEach(s => {
+      try { s.stop(); } catch (e) {}
+    });
+    sourcesRef.current.clear();
+    nextStartTimeRef.current = 0;
+    setIsModelSpeaking(false);
+    setLastAction("Sarah Silenced");
+    setTimeout(() => setLastAction(""), 2000);
+  }, []);
 
   useEffect(() => {
     // Simulate fetching lead data from VICIdial URL parameters
@@ -300,22 +357,36 @@ const App: React.FC = () => {
   }, []);
 
   const stopSession = useCallback(() => {
+    console.log("[Sarah] Aggressive session stop initiated...");
     setIsActive(false);
     isActiveRef.current = false;
     setIsModelSpeaking(false);
     setIsUserSpeaking(false);
     setListeningToId(null);
+    isSipCallRef.current = false;
+    setActiveCalls(prev => prev.filter(c => c.id !== 'live-session'));
+    window.speechSynthesis.cancel();
 
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       try { mediaRecorderRef.current.stop(); } catch (e) {}
+      mediaRecorderRef.current = null;
     }
     if (sessionRef.current) {
+      if ((sessionRef.current as any)._keepAliveInterval) {
+        clearInterval((sessionRef.current as any)._keepAliveInterval);
+      }
       try { sessionRef.current.close(); } catch (e) {}
       sessionRef.current = null;
     }
     if (sipSessionRef.current) {
-      try { sipSessionRef.current.terminate(); } catch (e) {}
+      const sessionToTerminate = sipSessionRef.current;
       sipSessionRef.current = null;
+      try { 
+        console.log("[SIP] Terminating session...");
+        sessionToTerminate.terminate(); 
+      } catch (e) {
+        console.warn("[SIP] Session terminate failed:", e);
+      }
     }
     if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
       try { inputAudioContextRef.current.close(); } catch (e) {}
@@ -330,14 +401,26 @@ const App: React.FC = () => {
     });
     sourcesRef.current.clear();
     setSilenceDuration(0);
-    window.speechSynthesis.cancel();
+    
+    // Clear any pending audio element
+    const remoteAudio = document.getElementById('sarah-remote-audio') as HTMLAudioElement;
+    if (remoteAudio) {
+      remoteAudio.pause();
+      remoteAudio.srcObject = null;
+    }
   }, []);
 
   useEffect(() => {
+    if (!isActive && activeCalls.some(c => c.id === 'live-session')) {
+      setActiveCalls(prev => prev.filter(c => c.id !== 'live-session'));
+    }
+  }, [isActive, activeCalls]);
+
+  useEffect(() => {
     // If silence persists for too long and Sarah hasn't acted, the client takes over
-    if (silenceDuration > 12 && isActive) {
+    if (silenceDuration > 45 && isActive) {
       setIsSafetyHangup(true);
-      setLastAction("Neural Timeout: Sarah failed to detect hangup. Forcing disconnect.");
+      setLastAction("Neural Timeout: Silence detected. Forcing disconnect.");
       setCallLogs(prev => [{
         id: Math.random().toString(36).substr(2, 9),
         reason: 'hung_up_auto',
@@ -361,6 +444,42 @@ const App: React.FC = () => {
       spokenLinesRef.current.clear();
     }
   }, [isCampaignActive]);
+
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  const triggerNotification = (title: string, body: string) => {
+    setLastAction(title);
+    setTimeout(() => setLastAction(null), 5000);
+
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(title, {
+        body,
+        icon: 'https://picsum.photos/seed/sarah/100/100'
+      });
+    }
+  };
+
+  const getSilentStream = () => {
+    try {
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const dst = ctx.createMediaStreamDestination();
+      // Generate a tiny bit of noise to keep the stream "alive" for some SIP stacks
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      gain.gain.value = 0.0001;
+      osc.connect(gain);
+      gain.connect(dst);
+      osc.start();
+      return dst.stream;
+    } catch (e) {
+      console.error("Failed to create silent stream:", e);
+      return null;
+    }
+  };
 
   const startSession = async (incomingStream?: MediaStream): Promise<void> => {
     if (isActiveRef.current) {
@@ -463,7 +582,19 @@ const App: React.FC = () => {
         },
         callbacks: {
           onopen: () => {
+            // Keep-alive interval to prevent timeouts
+            const keepAlive = setInterval(() => {
+              if (sessionRef.current) {
+                try {
+                  (sessionRef.current as any).sendRealtimeInput({
+                    text: "keep-alive"
+                  });
+                } catch (e) {}
+              }
+            }, 30000); // Every 30 seconds
+
             sessionPromise.then(session => {
+              (session as any)._keepAliveInterval = keepAlive;
               // Trigger Sarah to start the conversation
               try {
                 (session as any).sendRealtimeInput({
@@ -489,20 +620,57 @@ const App: React.FC = () => {
 
               const source = inputCtx.createMediaStreamSource(stream);
               
+              // Add a compressor to normalize input (makes quiet voices louder)
+              const compressor = inputCtx.createDynamicsCompressor();
+              compressor.threshold.setValueAtTime(-60, inputCtx.currentTime); // More sensitive
+              compressor.knee.setValueAtTime(30, inputCtx.currentTime);
+              compressor.ratio.setValueAtTime(20, inputCtx.currentTime); // More aggressive compression
+              compressor.attack.setValueAtTime(0.003, inputCtx.currentTime);
+              compressor.release.setValueAtTime(0.25, inputCtx.currentTime);
+
               // Add a gain node to boost input significantly
               const inputGain = inputCtx.createGain();
-              inputGain.gain.value = 4.0; // Even stronger boost for SIP audio
-              source.connect(inputGain);
+              inputGain.gain.value = 8.0; // Strong but clean boost
+              
+              source.connect(compressor);
+              compressor.connect(inputGain);
+              
+              // Add a limiter to prevent clipping after the gain
+              const limiter = inputCtx.createDynamicsCompressor();
+              limiter.threshold.setValueAtTime(-1, inputCtx.currentTime);
+              limiter.knee.setValueAtTime(0, inputCtx.currentTime);
+              limiter.ratio.setValueAtTime(20, inputCtx.currentTime);
+              limiter.attack.setValueAtTime(0, inputCtx.currentTime);
+              limiter.release.setValueAtTime(0.1, inputCtx.currentTime);
+              
+              inputGain.connect(limiter);
 
-              const scriptProcessor = inputCtx.createScriptProcessor(2048, 1, 1);
+              const scriptProcessor = inputCtx.createScriptProcessor(1024, 1, 1);
               scriptProcessorRef.current = scriptProcessor;
               let debugCount = 0;
               scriptProcessor.onaudioprocess = (e) => {
                 const inputData = e.inputBuffer.getChannelData(0);
                 const sum = inputData.reduce((a, b) => a + Math.abs(b), 0);
                 const volume = sum / inputData.length;
-                const isSpeaking = volume > 0.001; // Maximum sensitivity
+                setCurrentVolume(volume);
+                
+                // Update noise floor slowly (adaptive VAD)
+                noiseFloorRef.current = noiseFloorRef.current * 0.995 + volume * 0.005;
+                
+                // Sensitivity: User is speaking if volume is significantly above noise floor
+                const isSpeaking = volume > (noiseFloorRef.current * sensitivity) + 0.0002;
                 setIsUserSpeaking(isSpeaking);
+                
+                // CLIENT-SIDE BARGE-IN: If user speaks while Sarah is talking, silence her immediately
+                if (isSpeaking && isModelSpeaking) {
+                  console.log("[Sarah] Client-side barge-in detected. Silencing Sarah.");
+                  sourcesRef.current.forEach(s => {
+                    try { s.stop(); } catch (e) {}
+                  });
+                  sourcesRef.current.clear();
+                  nextStartTimeRef.current = 0;
+                  setIsModelSpeaking(false);
+                }
                 
                 // Aggressive debug logging for first 50 frames
                 if (debugCount < 50) {
@@ -513,26 +681,31 @@ const App: React.FC = () => {
                 }
                 
                 if (!isSpeaking && isActiveRef.current) {
-                  setSilenceDuration(prev => prev + (2048 / 16000));
+                  setSilenceDuration(prev => prev + (1024 / 16000));
                 } else {
                   setSilenceDuration(0);
                 }
                 
                 const int16 = new Int16Array(inputData.length);
                 for (let i = 0; i < inputData.length; i++) {
-                  // Add tiny dither to keep the model's VAD active during silence
-                  const dither = (Math.random() - 0.5) * 0.0002;
-                  int16[i] = (inputData[i] + dither) * 32768;
+                  // Clamp value and convert to Int16
+                  let val = inputData[i];
+                  if (val > 1) val = 1;
+                  if (val < -1) val = -1;
+                  int16[i] = Math.round(val * 32767);
                 }
+                
+                // Ensure we only send the exact bytes for this frame
+                const buffer = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
                 
                 session.sendRealtimeInput({ 
                   media: { 
-                    data: encode(new Uint8Array(int16.buffer)), 
+                    data: encode(buffer), 
                     mimeType: 'audio/pcm;rate=16000' 
                   } 
                 });
               };
-              inputGain.connect(scriptProcessor);
+              limiter.connect(scriptProcessor);
               scriptProcessor.connect(inputCtx.destination);
             });
           },
@@ -572,11 +745,15 @@ const App: React.FC = () => {
               sourcesRef.current.add(source);
             }
 
-            if (message.serverContent?.interrupted) {
-              sourcesRef.current.forEach(s => s.stop());
-              sourcesRef.current.clear();
-              nextStartTimeRef.current = 0;
-            }
+    if (message.serverContent?.interrupted) {
+      console.log("[Sarah] Model confirmed interruption.");
+      sourcesRef.current.forEach(s => {
+        try { s.stop(); } catch (e) {}
+      });
+      sourcesRef.current.clear();
+      nextStartTimeRef.current = 0;
+      setIsModelSpeaking(false);
+    }
 
             if ((message as any).serverContent?.modelTurn?.parts[0]?.text) {
               const text = (message as any).serverContent.modelTurn.parts[0].text;
@@ -590,6 +767,7 @@ const App: React.FC = () => {
 
             if ((message as any).serverContent?.userTurn?.parts[0]?.text) {
               const text = (message as any).serverContent.userTurn.parts[0].text;
+              console.log("[Sarah] User said:", text);
               currentInputTranscription.current += text;
               setActiveCalls(prev => prev.map(c => c.id === 'live-session' ? {
                 ...c,
@@ -641,7 +819,6 @@ const App: React.FC = () => {
                 if (fc.name === 'book_appointment') {
                   const args = fc.args as any;
                   const newAppt = {
-                    id: Math.random().toString(36).substr(2, 9),
                     firstName: args.first_name,
                     lastName: args.last_name,
                     address: args.full_address,
@@ -651,8 +828,15 @@ const App: React.FC = () => {
                     recordingUrl: recordingUrl || 'generating...',
                     description: `Air Duct Cleaning for ${args.first_name} ${args.last_name}. Price: ${args.price}. Driveway: ${args.has_driveway ? 'Yes' : 'No'}. DNC Permission: ${args.dnc_permission_granted ? 'Yes' : 'No'}.`
                   };
-                  setAppointments(prev => [newAppt, ...prev]);
-                  setLastAction(`Booking Confirmed for ${args.first_name}!`);
+                  
+                  // Save to backend
+                  fetch('/api/appointments', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(newAppt)
+                  }).catch(err => console.error("Failed to save appointment:", err));
+                  
+                  // Local update will happen via socket event 'appointment:new'
                 }
 
                 setTimeout(() => {
@@ -788,7 +972,7 @@ const App: React.FC = () => {
         authorization_user: dialerConfig.webrtcUser,
         display_name: 'Sarah AI Agent',
         register: true,
-        register_expires: 600,
+        register_expires: 3600,
         session_timers: false,
         hack_ip_in_contact: true,
         connection_recovery_min_interval: 2,
@@ -847,73 +1031,108 @@ const App: React.FC = () => {
     ua.on('disconnected', (e: any) => {
       setWebrtcStatus('disconnected');
       const cause = e.cause || 'Normal';
-      setSipLogs(prev => [{ type: 'info', msg: `Disconnected (${cause}).`, time: new Date().toLocaleTimeString() }, ...prev]);
+      setSipLogs(prev => [{ type: 'info', msg: `Disconnected (${cause}). Reconnecting in 3s...`, time: new Date().toLocaleTimeString() }, ...prev]);
       console.log("[SIP] Disconnected:", cause);
+      
+      // Auto-reconnect logic
+      if (cause !== 'Normal' && cause !== 'User Request') {
+        setTimeout(() => setReconnectTrigger(prev => prev + 1), 3000);
+      }
     });
 
     ua.on('newRTCSession', (data: any) => {
       const session = data.session;
       
+      // If Sarah is on a LOCAL call, stop it to answer the SIP call
+      if (isActiveRef.current && !isSipCallRef.current && session.direction === 'incoming') {
+        console.log("[SIP] Stopping local session to answer incoming SIP call...");
+        stopSession();
+      }
+
       // If Sarah is already on a call, reject the new one
-      if (isActiveRef.current || sipSessionRef.current) {
-        console.warn("[SIP] Sarah is busy, rejecting incoming call from:", session.remote_identity.uri.toString());
+      // But allow if the existing session is already ended (safety check)
+      const isActuallyBusy = isActiveRef.current || (sipSessionRef.current && !sipSessionRef.current.isEnded());
+      
+      if (isActuallyBusy && session.direction === 'incoming') {
+        console.warn("[SIP] Sarah is busy, rejecting incoming call.", {
+          isActive: isActiveRef.current,
+          isSipCall: isSipCallRef.current,
+          hasSipSession: !!sipSessionRef.current,
+          sessionEnded: sipSessionRef.current?.isEnded(),
+          remote: session.remote_identity.uri.toString()
+        });
         session.terminate({ status_code: 486, reason_phrase: "Busy Here" });
         return;
       }
 
+      console.log(`[SIP] New RTC Session (${session.direction}):`, session.remote_identity.uri.toString());
       sipSessionRef.current = session;
       let sessionStarted = false;
 
-      if (session.direction === 'incoming') {
-        session.on('peerconnection', (e: any) => {
-          const pc = e.peerconnection;
-          pc.ontrack = (event: any) => {
-            console.log("[SIP] Ontrack event:", event.track.kind, event.track.label);
-            
-            // Hard fix: Ensure we have a valid stream from the track
-            const remoteStream = event.streams[0] || new MediaStream([event.track]);
-            
-            if (!remoteStream) {
-              console.warn("[SIP] No remote stream found in ontrack event");
-              return;
-            }
+      // Setup PeerConnection handling for BOTH incoming and outgoing calls
+      session.on('peerconnection', (e: any) => {
+        const pc = e.peerconnection;
+        pc.ontrack = (event: any) => {
+          console.log("[SIP] Ontrack event:", event.track.kind, event.track.label);
+          
+          // Hard fix: Ensure we have a valid stream from the track
+          const remoteStream = event.streams[0] || new MediaStream([event.track]);
+          
+          if (!remoteStream) {
+            console.warn("[SIP] No remote stream found in ontrack event");
+            return;
+          }
 
-            const audioTracks = remoteStream.getAudioTracks();
-            if (audioTracks.length === 0) {
-              console.warn("[SIP] No audio tracks found in remote stream");
-              return;
-            }
+          const audioTracks = remoteStream.getAudioTracks();
+          if (audioTracks.length === 0) {
+            console.warn("[SIP] No audio tracks found in remote stream");
+            return;
+          }
 
-            console.log(`[SIP] Remote audio track detected: ${audioTracks[0].label} (${audioTracks[0].id})`);
+          console.log(`[SIP] Remote audio track detected: ${audioTracks[0].label} (${audioTracks[0].id})`);
 
-            // Only start if not already active to avoid double sessions
-            if (!isActiveRef.current && !sessionStarted) {
-              sessionStarted = true;
-              console.log("[SIP] Incoming call track detected, starting Sarah AI session...");
-              startSession(remoteStream).then(() => {
-                if (sarahVoiceDestRef.current) {
-                  const sarahStream = sarahVoiceDestRef.current.stream;
-                  const sarahTrack = sarahStream.getAudioTracks()[0];
-                  
-                  // Find the sender that's currently sending (likely the mic from answer())
-                  const sender = pc.getSenders().find((s: any) => s.track && s.track.kind === 'audio');
-                  if (sender) {
-                    console.log("[SIP] Swapping mic track with Sarah AI voice track");
-                    sender.replaceTrack(sarahTrack);
-                  } else {
-                    console.log("[SIP] No sender found, adding Sarah track");
-                    pc.addTrack(sarahTrack, sarahStream);
-                  }
+          // Only start if not already active to avoid double sessions
+          if (!isActiveRef.current && !sessionStarted) {
+            sessionStarted = true;
+            console.log("[SIP] Call track detected, starting Sarah AI session...");
+            startSession(remoteStream).then(() => {
+              if (sarahVoiceDestRef.current) {
+                const sarahStream = sarahVoiceDestRef.current.stream;
+                const sarahTrack = sarahStream.getAudioTracks()[0];
+                
+                // Find the sender that's currently sending (likely the silent stream from answer/call)
+                const sender = pc.getSenders().find((s: any) => s.track && s.track.kind === 'audio');
+                if (sender) {
+                  console.log("[SIP] Swapping silent track with Sarah AI voice track");
+                  sender.replaceTrack(sarahTrack).catch((err: any) => {
+                    console.error("[SIP] replaceTrack failed:", err);
+                  });
+                } else {
+                  console.log("[SIP] No sender found, adding Sarah track");
+                  pc.addTrack(sarahTrack, sarahStream);
                 }
-              }).catch(err => {
-                console.error("[SIP] Failed to start Sarah AI session:", err);
-                session.terminate();
-              });
-            }
-          };
-        });
+              }
+            }).catch(err => {
+              console.error("[SIP] Failed to start Sarah AI session:", err);
+              session.terminate();
+            });
+          }
+        };
+      });
 
+      session.on('accepted', () => {
+        console.log("[SIP] Call accepted by remote");
+        setLastAction("Call Connected");
+      });
+
+      session.on('confirmed', () => {
+        console.log("[SIP] Call confirmed (ACK received)");
+      });
+
+      if (session.direction === 'incoming') {
+        console.log("[SIP] Answering incoming call with silent stream...");
         session.answer({
+          mediaStream: getSilentStream() || undefined,
           mediaConstraints: { audio: true, video: false }
         });
       }
@@ -1016,6 +1235,8 @@ const App: React.FC = () => {
             setLastAction("Sarah's Script Offer Updated.");
             setTimeout(() => setLastAction(null), 3000);
           }}
+          sipProfiles={sipProfiles}
+          onUpdateSipProfiles={setSipProfiles}
           webrtcStatus={webrtcStatus}
           isUserSpeaking={isUserSpeaking}
           dailyCost={dailyCost}
@@ -1032,6 +1253,30 @@ const App: React.FC = () => {
           sipLogs={sipLogs}
           onClearSipLogs={() => setSipLogs([])}
           onUpdateSipLogs={setSipLogs}
+          currentVolume={currentVolume}
+          onMakeTestCall={(target) => {
+            if (!sipUaRef.current) {
+              setLastAction("Sarah is not connected to VICIdial.");
+              return;
+            }
+            if (!sipUaRef.current.isRegistered()) {
+              setLastAction("Sarah is not registered. Reconnecting...");
+              setReconnectTrigger(prev => prev + 1);
+              return;
+            }
+            console.log("[SIP] Placing manual call to:", target || '9999');
+            try {
+              const session = sipUaRef.current.call(target || '9999', {
+                mediaStream: getSilentStream() || undefined,
+                mediaConstraints: { audio: true, video: false }
+              });
+              // Note: sipSessionRef.current will be set in the newRTCSession handler
+              setLastAction(`Dialing ${target || '9999'}...`);
+            } catch (e) {
+              console.error("[SIP] Call failed to initiate:", e);
+              setLastAction("Call failed to initiate.");
+            }
+          }}
         />
       </div>
 
@@ -1049,6 +1294,16 @@ const App: React.FC = () => {
             {isActive ? <PhoneOff className="w-4 h-4" /> : <Play className="w-4 h-4" />}
             {isActive ? "End Live Session" : "Start Live Session"}
           </button>
+          
+          {isActive && isModelSpeaking && (
+            <button
+              onClick={forceInterrupt}
+              className="px-6 py-3 rounded-2xl font-black uppercase tracking-widest text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20 hover:bg-amber-500/20 transition-all flex items-center gap-2"
+            >
+              <MicOff className="w-3 h-3" />
+              Interrupt Sarah
+            </button>
+          )}
         </div>
 
         <div className="flex items-center gap-8">
@@ -1095,6 +1350,27 @@ const App: React.FC = () => {
                       {voice}
                     </button>
                   ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-black text-white/30 uppercase tracking-widest mb-3 block flex justify-between">
+                  Interrupt Sensitivity
+                  <span className="text-indigo-400">{sensitivity.toFixed(1)}x</span>
+                </label>
+                <input 
+                  type="range" 
+                  min="1.1" 
+                  max="5.0" 
+                  step="0.1"
+                  value={sensitivity}
+                  onChange={(e) => setSensitivity(parseFloat(e.target.value))}
+                  className="w-full accent-indigo-500"
+                />
+                <div className="flex justify-between text-[8px] text-white/20 uppercase font-bold mt-2">
+                  <span>Aggressive</span>
+                  <span>Balanced</span>
+                  <span>Conservative</span>
                 </div>
               </div>
             </div>

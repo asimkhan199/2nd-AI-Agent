@@ -36,6 +36,9 @@ interface DashboardProps {
   onUpdateSipLogs?: (logs: any[] | ((prev: any[]) => any[])) => void;
   onUpdateDialerConfig?: (config: any) => void;
   isUserSpeaking?: boolean;
+  currentVolume?: number;
+  sipProfiles?: any[];
+  onUpdateSipProfiles?: (profiles: any[]) => void;
 }
 
 export const OrchestrationDashboard: React.FC<DashboardProps> = ({ 
@@ -69,7 +72,10 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
   onClearSipLogs,
   onUpdateSipLogs: setSipLogs,
   onUpdateDialerConfig: setDialerConfig,
-  isUserSpeaking = false
+  isUserSpeaking = false,
+  currentVolume = 0,
+  sipProfiles = [],
+  onUpdateSipProfiles: setSipProfiles
 }) => {
   const [outboundIp, setOutboundIp] = useState<string>('Detecting...');
 
@@ -80,11 +86,7 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
       .catch(() => setOutboundIp('Error detecting'));
   }, []);
 
-  const [view, setView] = useState<'live' | 'reports' | 'training' | 'calendar' | 'vicidial'>('live');
-  const [sipProfiles, setSipProfiles] = useState<any[]>(() => {
-    const saved = localStorage.getItem('sip_profiles');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [view, setView] = useState<'live' | 'reports' | 'training' | 'calendar' | 'vicidial' | 'sip-config'>('live');
   const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
   const [profileName, setProfileName] = useState<string>('');
 
@@ -137,9 +139,9 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
     };
     
     if (activeProfileId) {
-      setSipProfiles(sipProfiles.map(p => p.id === activeProfileId ? newProfile : p));
+      setSipProfiles?.(sipProfiles.map(p => p.id === activeProfileId ? newProfile : p));
     } else {
-      setSipProfiles([...sipProfiles, newProfile]);
+      setSipProfiles?.([...sipProfiles, newProfile]);
       setActiveProfileId(newProfile.id);
     }
     setProfileName(name);
@@ -157,9 +159,10 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
         sipPass: profile.pass,
         wsUrl: profile.wsUrl || '',
         webrtcUser: profile.webrtcUser || '',
-        webrtcPass: profile.webrtcPass || ''
+        webrtcPass: profile.webrtcPass || '',
+        profileName: profile.name
       };
-      setDialerConfig(newConfig);
+      setDialerConfig?.(newConfig);
       setActiveProfileId(id);
       setProfileName(profile.name);
       syncDialerConfig(newConfig);
@@ -167,7 +170,7 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
   };
 
   const deleteProfile = (id: string) => {
-    setSipProfiles(sipProfiles.filter(p => p.id !== id));
+    setSipProfiles?.(sipProfiles.filter(p => p.id !== id));
     if (activeProfileId === id) setActiveProfileId(null);
   };
 
@@ -315,6 +318,11 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
             <h1 className="text-xl font-black uppercase tracking-tighter">ENVISION SERVICES</h1>
             <p className="text-[10px] text-white/40 font-mono uppercase tracking-widest">v2.5 Production Cluster</p>
           </div>
+          <div className={`ml-4 px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest border transition-all ${
+            webrtcStatus === 'connected' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'bg-red-500/10 border-red-500/30 text-red-400 animate-pulse'
+          }`}>
+            {webrtcStatus === 'connected' ? 'Sarah Connected' : 'Sarah Disconnected'}
+          </div>
         </div>
 
         <div className="flex items-center gap-6">
@@ -363,10 +371,16 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
               Calendar
             </button>
             <button 
+              onClick={() => setView('sip-config')}
+              className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${view === 'sip-config' ? 'bg-indigo-500 text-white shadow-lg' : 'text-white/40 hover:text-white'}`}
+            >
+              SIP Profiles
+            </button>
+            <button 
               onClick={() => setView('vicidial')}
               className={`px-4 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-widest transition-all ${view === 'vicidial' ? 'bg-emerald-500 text-white shadow-lg' : 'text-white/40 hover:text-white'}`}
             >
-              Vicidial Link
+              Connect Sarah
             </button>
           </div>
 
@@ -849,7 +863,7 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                           type="text" 
                           value={dialerConfig.webrtcUser}
                           onChange={(e) => setDialerConfig({...dialerConfig, webrtcUser: e.target.value})}
-                          placeholder="e.g. 78602"
+                          placeholder="e.g. 78624"
                           className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-xs text-white focus:border-emerald-500 transition-all"
                         />
                       </div>
@@ -929,7 +943,7 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
 
                       <div>
                         <p className="text-[10px] font-black text-white/60 uppercase mb-2">Step 2: Apply to Phone</p>
-                        <p className="text-[10px] text-white/40">Go to <span className="text-white">Admin &gt; Phones &gt; 78602</span>. Set <span className="text-white">Template ID</span> to <span className="text-indigo-400 font-bold">WEBRTC</span> and save.</p>
+                        <p className="text-[10px] text-white/40">Go to <span className="text-white">Admin &gt; Phones &gt; 78624</span>. Set <span className="text-white">Template ID</span> to <span className="text-indigo-400 font-bold">WEBRTC</span> and save.</p>
                       </div>
                     </div>
                   </div>
@@ -1000,7 +1014,7 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                       <div className="bg-black/60 p-3 rounded font-mono text-[9px] text-emerald-300">
                         ; Sarah AI Bridge<br/>
                         exten =&gt; 9999,1,NoOp(Sarah Bridge)<br/>
-                        exten =&gt; 9999,n,Dial(SIP/{dialerConfig.webrtcUser || '78602'},30,tTo)<br/>
+                        exten =&gt; 9999,n,Dial(SIP/{dialerConfig.webrtcUser || '78624'},30,tTo)<br/>
                         exten =&gt; 9999,n,Hangup()
                       </div>
                     </div>
@@ -1157,10 +1171,10 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                         const defaults = {
                           sipServer: '93.127.128.38',
                           sipPort: '5060',
-                          sipUser: '78602',
+                          sipUser: '78624',
                           sipPass: 'test',
                           wsUrl: 'wss://93.127.128.38:8089/ws',
-                          webrtcUser: '78602',
+                          webrtcUser: '78624',
                           webrtcPass: 'test',
                           status: 'idle'
                         };
@@ -1355,11 +1369,20 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-white/20 uppercase font-black text-[9px]">Input Audio</span>
-                      <div className="flex items-center gap-2">
-                        <div className={`w-2 h-2 rounded-full transition-all duration-75 ${isUserSpeaking ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)] scale-125' : 'bg-white/10'}`}></div>
-                        <span className={`text-[10px] font-bold ${isUserSpeaking ? 'text-emerald-400' : 'text-white/20'}`}>
-                          {isUserSpeaking ? 'DETECTED' : 'SILENT'}
-                        </span>
+                      <div className="flex flex-col items-end gap-1">
+                        <div className="flex items-center gap-2">
+                          <div className={`w-2 h-2 rounded-full transition-all duration-75 ${isUserSpeaking ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)] scale-125' : 'bg-white/10'}`}></div>
+                          <span className={`text-[10px] font-bold ${isUserSpeaking ? 'text-emerald-400' : 'text-white/20'}`}>
+                            {isUserSpeaking ? 'DETECTED' : 'SILENT'}
+                          </span>
+                        </div>
+                        {/* Volume Bar */}
+                        <div className="w-24 h-1 bg-white/5 rounded-full overflow-hidden">
+                          <div 
+                            className={`h-full transition-all duration-75 ${currentVolume && currentVolume > 0.001 ? 'bg-emerald-500' : 'bg-white/10'}`}
+                            style={{ width: `${Math.min(100, (currentVolume || 0) * 1000)}%` }}
+                          ></div>
+                        </div>
                       </div>
                     </div>
                     <div className="flex justify-between items-center">
@@ -1373,6 +1396,16 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                         className="w-full py-3 bg-indigo-500 hover:bg-indigo-600 rounded-xl text-[9px] font-black uppercase tracking-widest text-white transition-all shadow-lg shadow-indigo-500/20"
                       >
                         {webrtcStatus === 'connecting' ? 'Connecting...' : 'Connect Sarah Bridge'}
+                      </button>
+                      <button 
+                        onClick={() => {
+                          if (confirm('Force System Reset? This will reload the page and kill all active audio sessions.')) {
+                            window.location.reload();
+                          }
+                        }}
+                        className="w-full mt-2 py-2 bg-red-500/10 hover:bg-red-500/20 rounded-xl text-[8px] font-black uppercase tracking-widest text-red-400 border border-red-500/20 transition-all"
+                      >
+                        Force System Reset
                       </button>
                     </div>
                   </div>
@@ -1473,14 +1506,14 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                   </div>
                   <div className="space-y-4">
                     <p className="text-[10px] text-white/40 leading-relaxed">
-                      If you just reinstalled Vicidial, follow these steps to link Sarah to extension <span className="text-white font-bold">78602</span>:
+                      If you just reinstalled Vicidial, follow these steps to link Sarah to extension <span className="text-white font-bold">78624</span>:
                     </p>
                     <div className="bg-black/40 p-5 rounded-2xl border border-white/5 space-y-4">
                       <div className="flex gap-4">
                         <div className="w-6 h-6 rounded-full bg-indigo-500/20 flex items-center justify-center text-[10px] font-black text-indigo-400 shrink-0">1</div>
                         <div>
                           <p className="text-[10px] text-white font-bold uppercase tracking-wider mb-1">Vicidial Admin Panel</p>
-                          <p className="text-[9px] text-white/40">Go to <span className="text-white">Admin {"->"} Phones {"->"} 78602</span> and set:</p>
+                          <p className="text-[9px] text-white/40">Go to <span className="text-white">Admin {"->"} Phones {"->"} 78624</span> and set:</p>
                           <ul className="text-[9px] text-indigo-400/80 mt-2 space-y-1 list-disc pl-3">
                             <li>Set as WebRTC: <span className="text-indigo-400 font-bold">Y</span></li>
                             <li>Registration Password: <span className="text-indigo-400 font-bold">test</span></li>
@@ -1516,7 +1549,7 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                       <p className="text-[10px] text-white/40 uppercase font-black mb-2">Step 1: Phone Login</p>
                       <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
                         <span className="text-white/20">Phone Login:</span>
-                        <span className="text-white font-bold">{dialerConfig.webrtcUser || '78602'}</span>
+                        <span className="text-white font-bold">{dialerConfig.webrtcUser || '78624'}</span>
                         <span className="text-white/20">Phone Pass:</span>
                         <span className="text-white font-bold">{dialerConfig.webrtcPass || 'test'}</span>
                       </div>
@@ -1600,11 +1633,11 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                       </p>
                       <div className="bg-black/60 p-4 rounded-xl border border-white/10 font-mono text-[10px] relative group">
                         <code className="text-emerald-400 break-all">
-                          mysql -u cron -p1234 -e "SELECT extension,status,protocol,is_webrtc,webphone_auto_answer FROM vicidial_phones WHERE extension='{dialerConfig.webrtcUser || '78602'}';" asterisk
+                          mysql -u cron -p1234 -e "SELECT extension,status,protocol,is_webrtc,webphone_auto_answer FROM vicidial_phones WHERE extension='{dialerConfig.webrtcUser || '78624'}';" asterisk
                         </code>
                         <button 
                           onClick={() => {
-                            navigator.clipboard.writeText(`mysql -u cron -p1234 -e "SELECT extension,status,protocol,is_webrtc,webphone_auto_answer FROM vicidial_phones WHERE extension='${dialerConfig.webrtcUser || '78602'}';" asterisk`);
+                            navigator.clipboard.writeText(`mysql -u cron -p1234 -e "SELECT extension,status,protocol,is_webrtc,webphone_auto_answer FROM vicidial_phones WHERE extension='${dialerConfig.webrtcUser || '78624'}';" asterisk`);
                             alert('Command copied!');
                           }}
                           className="absolute right-2 top-2 p-2 bg-white/5 hover:bg-white/10 rounded-lg opacity-0 group-hover:opacity-100 transition-all"
@@ -1678,7 +1711,12 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                             {appt.firstName[0]}{appt.lastName[0]}
                           </div>
                           <div>
-                            <h4 className="text-xl font-black text-white">{appt.firstName} {appt.lastName}</h4>
+                            <div className="flex items-center gap-3">
+                              <h4 className="text-xl font-black text-white">{appt.firstName} {appt.lastName}</h4>
+                              {appt.bookedAt && (Date.now() - new Date(appt.bookedAt).getTime() < 300000) && (
+                                <span className="px-2 py-0.5 bg-emerald-500 text-white text-[8px] font-black uppercase rounded-full animate-pulse">New</span>
+                              )}
+                            </div>
                             <div className="flex items-center gap-3 mt-1">
                               <span className="flex items-center gap-1 text-[10px] text-white/40 font-mono">
                                 <Clock className="w-3 h-3" /> {appt.time}
@@ -2218,6 +2256,78 @@ export const OrchestrationDashboard: React.FC<DashboardProps> = ({
                     </p>
                   </div>
                 )}
+              </div>
+            </div>
+          </div>
+        ) : view === 'vicidial' ? (
+          <div className="flex-1 p-8 overflow-y-auto custom-scrollbar flex flex-col items-center justify-center">
+            <div className="w-full max-w-2xl bg-white/5 rounded-[3rem] border border-white/10 p-12 shadow-2xl">
+              <div className="flex items-center gap-6 mb-10">
+                <div className="w-16 h-16 bg-emerald-500/10 rounded-2xl flex items-center justify-center border border-emerald-500/20">
+                  <Link2 className="w-8 h-8 text-emerald-400" />
+                </div>
+                <div>
+                  <h2 className="text-3xl font-black uppercase tracking-tighter">Connect to Sarah</h2>
+                  <p className="text-xs text-white/40 font-mono uppercase tracking-widest">Vicidial Integration Hub</p>
+                </div>
+              </div>
+
+              <div className="space-y-8">
+                <div className="bg-black/40 p-10 rounded-[2.5rem] border border-white/5 flex flex-col items-center justify-center text-center">
+                  <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-6 transition-all duration-1000 ${
+                    webrtcStatus === 'connected' ? 'bg-emerald-500/20 shadow-[0_0_40px_rgba(16,185,129,0.2)]' : 
+                    webrtcStatus === 'connecting' ? 'bg-amber-500/20 animate-pulse' :
+                    'bg-red-500/10'
+                  }`}>
+                    <Activity className={`w-10 h-10 ${
+                      webrtcStatus === 'connected' ? 'text-emerald-400' : 
+                      webrtcStatus === 'connecting' ? 'text-amber-400' : 
+                      'text-red-400'
+                    }`} />
+                  </div>
+                  
+                  <h3 className="text-xl font-black uppercase tracking-widest mb-2">
+                    {webrtcStatus === 'connected' ? 'Sarah is Online' : 
+                     webrtcStatus === 'connecting' ? 'Connecting Sarah...' : 
+                     'Sarah is Offline'}
+                  </h3>
+                  <p className="text-xs text-white/40 mb-8 max-w-sm">
+                    {webrtcStatus === 'connected' 
+                      ? `Sarah is currently connected to Vicidial on extension ${dialerConfig.webrtcUser || '78624'}. She will automatically answer any incoming calls.`
+                      : "Sarah is currently disconnected. Click the button below to connect her to your Vicidial server."}
+                  </p>
+
+                  <button 
+                    onClick={onConnectSip}
+                    className={`w-full py-6 rounded-2xl font-black uppercase tracking-widest text-sm transition-all shadow-2xl flex items-center justify-center gap-4 ${
+                      webrtcStatus === 'connected' ? 'bg-emerald-500 text-white hover:bg-emerald-600' : 
+                      webrtcStatus === 'connecting' ? 'bg-amber-500 text-white cursor-wait' :
+                      'bg-indigo-500 text-white hover:bg-indigo-600 shadow-indigo-500/20'
+                    }`}
+                  >
+                    {webrtcStatus === 'connected' ? <CheckCircle className="w-5 h-5" /> : <Play className="w-5 h-5" />}
+                    {webrtcStatus === 'connected' ? 'Reconnect Sarah' : 
+                     webrtcStatus === 'connecting' ? 'Connecting...' : 'Connect to Sarah'}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="bg-white/5 p-6 rounded-2xl border border-white/5">
+                    <span className="text-[8px] text-white/30 uppercase font-black block mb-2">Extension</span>
+                    <span className="text-sm font-mono font-bold text-white">{dialerConfig.webrtcUser || '78624'}</span>
+                  </div>
+                  <div className="bg-white/5 p-6 rounded-2xl border border-white/5">
+                    <span className="text-[8px] text-white/30 uppercase font-black block mb-2">Server</span>
+                    <span className="text-sm font-mono font-bold text-white truncate max-w-[150px]">{dialerConfig.sipServer || '93.127.128.38'}</span>
+                  </div>
+                </div>
+
+                <button 
+                  onClick={() => setView('sip-config')}
+                  className="w-full py-4 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest text-white/40 hover:text-white transition-all flex items-center justify-center gap-3"
+                >
+                  <Settings className="w-4 h-4" /> Change Credentials / New Vicidial
+                </button>
               </div>
             </div>
           </div>
